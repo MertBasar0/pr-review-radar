@@ -160,7 +160,7 @@ function findOverlaps(pr, watchedPaths, watchedLabels) {
 function mergePullRequestRecord(existing, incoming) {
   if (!existing) return incoming;
   const merged = { ...existing, ...incoming };
-  for (const arrayField of ["statusCheckRollup", "files", "labels", "reviewRequests"]) {
+  for (const arrayField of ["statusCheckRollup", "files", "labels", "reviewRequests", "commits"]) {
     const prevArr = Array.isArray(existing[arrayField]) ? existing[arrayField] : [];
     const nextArr = Array.isArray(incoming[arrayField]) ? incoming[arrayField] : [];
     merged[arrayField] = nextArr.length >= prevArr.length ? nextArr : prevArr;
@@ -176,6 +176,18 @@ function mergePullRequestRecord(existing, incoming) {
     merged.mergeStateStatus = existing.mergeStateStatus;
   }
   return merged;
+}
+
+function hasCommitCoAuthor(commits, normalizedViewer) {
+  if (!normalizedViewer || !Array.isArray(commits)) return false;
+  for (const commit of commits) {
+    for (const author of Array.isArray(commit?.authors) ? commit.authors : []) {
+      if (normalizeHandle(author?.login) === normalizedViewer) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 function normalizeRepositories(rawRepositories) {
@@ -208,7 +220,10 @@ function normalizeRepositories(rawRepositories) {
 function classifyPullRequest(repo, pr, config) {
   const viewer = normalizeHandle(config.viewerHandle);
   const author = normalizeHandle(pr?.author?.login);
-  const isMine = Boolean(viewer && author === viewer);
+  const isAuthored = Boolean(viewer && author === viewer);
+  const isCoAuthored = Boolean(!isAuthored && hasCommitCoAuthor(pr?.commits, viewer));
+  const isMine = isAuthored || isCoAuthored;
+  const ownership = isAuthored ? "authored" : isCoAuthored ? "coauthored" : "external";
   const isDraft = Boolean(pr?.isDraft);
   const mergeable = String(pr?.mergeable ?? "").toUpperCase();
   const mergeState = String(pr?.mergeStateStatus ?? "UNKNOWN").toUpperCase();
@@ -237,6 +252,7 @@ function classifyPullRequest(repo, pr, config) {
 
     if (checksFailing || hasConflict || changesRequested) {
       tier = "P1";
+      if (isCoAuthored && author) reasons.push(`co-authored via @${author}`);
       if (isDraft) reasons.push("draft");
       if (checksFailing) {
         const preview = checks.failing.slice(0, 3).join(", ");
@@ -255,6 +271,7 @@ function classifyPullRequest(repo, pr, config) {
           : "Address requested review changes";
     } else if (!isDraft && (checks.state === "passing" || checks.state === "none")) {
       tier = "P2";
+      if (isCoAuthored && author) reasons.push(`co-authored via @${author}`);
       const awaitingGate =
         mergeState === "BLOCKED" || reviewDecision === "REVIEW_REQUIRED";
       if (reviewDecision === "APPROVED" && !awaitingGate) {
@@ -321,6 +338,7 @@ function classifyPullRequest(repo, pr, config) {
       ? String(pr.url)
       : "",
     author: normalizeHandle(pr?.author?.login) || "unknown",
+    ownership,
     headRefOid,
     isDraft,
     tier,

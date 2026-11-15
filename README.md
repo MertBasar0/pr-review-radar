@@ -4,14 +4,14 @@ An [OpenClaw Agent Template](https://clawhub.ai/mertbasar0/templates/pr-review-r
 
 ## Four-Tier Triage Model
 
-1. **P1 — Unblock Yours Now:** Authored PRs with non-cancelled failing checks (deduplicated by latest run, with failing check names surfaced inline), merge conflicts, or `CHANGES_REQUESTED` review decisions.
-2. **P2 — Ready to Land:** Authored non-draft PRs with green checks and zero conflicts (distinguishing immediately mergeable PRs from `BLOCKED` / `REVIEW_REQUIRED` branch-gated PRs).
+1. **P1 — Unblock Yours Now:** Authored or commit-co-authored (`commits[].authors`) PRs with non-cancelled failing checks (deduplicated by latest run, with failing check names surfaced inline), merge conflicts, or `CHANGES_REQUESTED` review decisions.
+2. **P2 — Ready to Land:** Authored or commit-co-authored non-draft PRs with green checks and zero conflicts (distinguishing immediately mergeable PRs from `BLOCKED` / `REVIEW_REQUIRED` branch-gated PRs).
 3. **P3 — Review Queue Waiting on You:** Non-draft PRs explicitly requesting your review (`reviewRequests`), ranked with CI-green candidates first.
 4. **P4 — Subsystem Overlap Watch:** Active PRs touching your configured `watchedPaths` or `watchedLabels` so overlapping refactors surface early.
 
-## Large-Repo Performance (Three-Slice Collection)
+## Large-Repo Performance & Co-Author Detection (Four-Slice Collection)
 
-Repositories with 100+ CI check runs per PR can trigger GitHub GraphQL `HTTP 504` timeouts on wide `statusCheckRollup` + `files` queries. `pr-review-radar` collects three bounded read-only `gh pr list` slices per repository (`authored`, `reviews`, and check-free `recent` overlap PRs) and merges them via `pr-radar-engine.mjs --slice <owner/repo>=state/<slug>-*.json --save-sweep`.
+Repositories with 100+ CI check runs per PR can trigger GitHub GraphQL `HTTP 504` timeouts on wide `statusCheckRollup` + `files` queries, and `--author` alone misses PRs published via automation bots or pair-programming teammates. `pr-review-radar` collects four bounded read-only `gh pr list` slices per repository (`authored`, `coauthored` verified strictly via structured `commits[].authors`, `reviews`, and check-free `recent` overlap PRs) and merges them via `pr-radar-engine.mjs --slice <owner/repo>=state/<slug>-*.json --save-sweep`.
 
 ## Quick Start
 

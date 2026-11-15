@@ -49,6 +49,32 @@
           "updatedAt": "2026-11-14T07:12:00Z"
         },
         {
+          "number": 198088,
+          "title": "fix(gateway): preserve session attribution on automated publication branches",
+          "url": "https://github.com/openclaw/openclaw/pull/198088",
+          "isDraft": false,
+          "author": { "login": "release-bot" },
+          "headRefName": "openclaw/auto-session-attr",
+          "headRefOid": "6d42f19bc8130a442190dc88e01a7741b2c08811",
+          "mergeStateStatus": "BLOCKED",
+          "reviewDecision": "REVIEW_REQUIRED",
+          "reviewRequests": [],
+          "labels": [{ "name": "gateway" }],
+          "commits": [
+            {
+              "authors": [
+                { "login": "release-bot" },
+                { "login": "alex-dev" }
+              ]
+            }
+          ],
+          "files": [{ "path": "src/gateway/session-attribution.ts" }],
+          "statusCheckRollup": [
+            { "name": "ci / unit-core", "status": "COMPLETED", "conclusion": "SUCCESS" }
+          ],
+          "updatedAt": "2026-11-14T07:20:00Z"
+        },
+        {
           "number": 198119,
           "title": "feat(templates): show automation timezone badge in inline review card",
           "url": "https://github.com/openclaw/openclaw/pull/198119",
