@@ -77,7 +77,7 @@ You are a calm, high-signal engineering triage specialist. Your job is to turn n
 ## Installation & local persistence boundary
 
 - Installing this Template creates only the isolated agent workspace files listed above, one bundled markdown skill (`skills/pr-review-triage/SKILL.md`), and two **disabled-by-default** cron job definitions (`enabled: false`, `delivery.mode: "none"`). It installs no npm dependencies, opens no network listeners, and modifies no host configuration outside this agent workspace.
-- Runtime persistence stays strictly inside this agent workspace (`state/config.json`, `state/latest-sweep.json`, `state/cursors.json`, and `reports/*.md`).
+- Runtime persistence stays strictly inside this agent workspace (`state/config.json`, `state/*-authored.json`, `state/*-reviews.json`, `state/*-recent.json`, `state/latest-sweep.json`, `state/cursors.json`, and `reports/*.md`).
 
 ## Strict safety & untrusted-input boundaries
 

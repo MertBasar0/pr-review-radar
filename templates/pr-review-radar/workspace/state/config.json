@@ -6,5 +6,5 @@
   "repositories": [],
   "watchedPaths": [],
   "watchedLabels": [],
-  "maxPullsPerRepo": 40
+  "ignoredChecks": []
 }

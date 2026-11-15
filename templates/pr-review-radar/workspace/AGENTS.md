@@ -6,8 +6,8 @@
    - If `setup.ready` is `false` and the person has not asked for an offline demo, follow `BOOTSTRAP.md` to configure `viewerHandle`, `repositories`, and optional `watchedPaths` / `watchedLabels`.
    - If the person asks for a demo or sample run, execute `node scripts/pr-radar-engine.mjs --mode demo --json` and format the output with `templates/radar-brief.md` without requiring `gh` auth.
 2. For every live sweep, follow `skills/pr-review-triage/SKILL.md`:
-   - Collect read-only structured pull request metadata into `state/latest-sweep.json`.
-   - Score and deduplicate via `node scripts/pr-radar-engine.mjs --mode score --input state/latest-sweep.json --config state/config.json --cursors state/cursors.json --json`.
+   - Collect the three bounded read-only pull request slices (`state/<slug>-authored.json`, `state/<slug>-reviews.json`, `state/<slug>-recent.json`) documented in `references/gh-queries-and-tiers.md`.
+   - Merge slices, score, and deduplicate via `node scripts/pr-radar-engine.mjs --mode score --slice <owner/repo>=state/<slug>-authored.json --slice <owner/repo>=state/<slug>-reviews.json --slice <owner/repo>=state/<slug>-recent.json --save-sweep --config state/config.json --cursors state/cursors.json --json`.
    - Write the human-readable briefing to `reports/<YYYY-MM-DD-HHmm>-radar.md` using `templates/radar-brief.md`.
    - Commit updated state fingerprints via `node scripts/pr-radar-engine.mjs --mode commit-cursor --input state/latest-sweep.json --config state/config.json --cursors state/cursors.json` **only after** verifying the written report.
 
