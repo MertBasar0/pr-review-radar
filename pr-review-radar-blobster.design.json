@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "id": "pr-review-radar",
+  "name": "PR Review Radar",
+  "description": "A deep-navy tactical Blobster in a high-contrast slate jacket with a glowing cyan radar scope and signal antenna.",
+  "palette": {
+    "shell": "#2d5f9a",
+    "claw": "#1e4473",
+    "glint": "#c9f5ff"
+  },
+  "layers": {
+    "back": "",
+    "left_prop": "",
+    "right_prop": "<path d=\"M104 54 L110 30\" fill=\"none\" stroke=\"#3b4a5e\" stroke-width=\"3.5\" stroke-linecap=\"round\"/><circle cx=\"112\" cy=\"22\" r=\"11\" fill=\"#102030\" stroke=\"#63d8f2\" stroke-width=\"2.5\"/><circle cx=\"112\" cy=\"22\" r=\"5.5\" fill=\"none\" stroke=\"#63d8f2\" stroke-width=\"1.5\" stroke-opacity=\"0.75\"/><line x1=\"112\" y1=\"22\" x2=\"119\" y2=\"16\" stroke=\"#7ef7b8\" stroke-width=\"2\" stroke-linecap=\"round\"/><circle cx=\"117\" cy=\"18\" r=\"2\" fill=\"#7ef7b8\"/>",
+    "shell_overlay": "<path d=\"M18 52 Q60 62 102 52 L102 98 L18 98 Z\" fill=\"#162436\"/><path d=\"M46 56 L60 72 L74 56\" fill=\"none\" stroke=\"#63d8f2\" stroke-width=\"3\" stroke-linejoin=\"round\"/><circle cx=\"60\" cy=\"81\" r=\"8\" fill=\"#0e1a28\" stroke=\"#63d8f2\" stroke-width=\"2\"/><path d=\"M56 81 L59 84 L65 78\" fill=\"none\" stroke=\"#7ef7b8\" stroke-width=\"2.2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>",
+    "accessory": "<path d=\"M60 10 L60 -2\" fill=\"none\" stroke=\"#63d8f2\" stroke-width=\"2.8\" stroke-linecap=\"round\"/><circle cx=\"60\" cy=\"-5\" r=\"3.5\" fill=\"#7ef7b8\"/><path d=\"M51 -5 A9 9 0 0 1 55 -12 M69 -5 A9 9 0 0 0 65 -12\" fill=\"none\" stroke=\"#63d8f2\" stroke-width=\"1.8\" stroke-linecap=\"round\"/>"
+  }
+}

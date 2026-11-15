@@ -1,0 +1,9 @@
+{
+  "name": "@mertbasar0/pr-review-radar",
+  "version": "0.1.1",
+  "license": "MIT",
+  "type": "module",
+  "openclaw": {
+    "template": "CLAW.md"
+  }
+}

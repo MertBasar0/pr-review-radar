@@ -1,0 +1,10 @@
+{
+  "setup": {
+    "ready": false
+  },
+  "viewerHandle": "",
+  "repositories": [],
+  "watchedPaths": [],
+  "watchedLabels": [],
+  "maxPullsPerRepo": 40
+}

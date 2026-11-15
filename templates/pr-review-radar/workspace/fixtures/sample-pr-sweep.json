@@ -1,0 +1,109 @@
+{
+  "capturedAt": "2026-11-14T08:00:00Z",
+  "demoConfig": {
+    "viewerHandle": "alex-dev",
+    "repositories": ["openclaw/openclaw"],
+    "watchedPaths": ["src/templates/", "skills/create-template/"],
+    "watchedLabels": ["templates"]
+  },
+  "repositories": [
+    {
+      "repo": "openclaw/openclaw",
+      "pullRequests": [
+        {
+          "number": 198104,
+          "title": "feat(templates): preserve bundled skill file permissions during archive build",
+          "url": "https://github.com/openclaw/openclaw/pull/198104",
+          "isDraft": false,
+          "author": { "login": "alex-dev" },
+          "headRefName": "feat/template-skill-modes",
+          "headRefOid": "9f21c84bd712e901a34b211c8810aa43bc1092f1",
+          "mergeStateStatus": "CLEAN",
+          "reviewDecision": "REVIEW_REQUIRED",
+          "reviewRequests": [],
+          "labels": [{ "name": "templates" }],
+          "files": [{ "path": "src/templates/project-build.ts" }],
+          "statusCheckRollup": [
+            { "name": "ci / unit-core", "status": "COMPLETED", "conclusion": "FAILURE" },
+            { "name": "ci / lint", "status": "COMPLETED", "conclusion": "SUCCESS" }
+          ],
+          "updatedAt": "2026-11-14T06:45:00Z"
+        },
+        {
+          "number": 198052,
+          "title": "fix(cli): reject blank output path in templates build",
+          "url": "https://github.com/openclaw/openclaw/pull/198052",
+          "isDraft": false,
+          "author": { "login": "alex-dev" },
+          "headRefName": "fix/templates-build-blank-out",
+          "headRefOid": "3c71b09aa4129f883104dc99e01a7741b2c088e4",
+          "mergeStateStatus": "CLEAN",
+          "reviewDecision": "APPROVED",
+          "reviewRequests": [],
+          "labels": [{ "name": "cli" }],
+          "files": [{ "path": "src/cli/templates-cli.project.ts" }],
+          "statusCheckRollup": [
+            { "name": "ci / unit-core", "status": "COMPLETED", "conclusion": "SUCCESS" },
+            { "name": "ci / lint", "status": "COMPLETED", "conclusion": "SUCCESS" }
+          ],
+          "updatedAt": "2026-11-14T07:12:00Z"
+        },
+        {
+          "number": 198119,
+          "title": "feat(templates): show automation timezone badge in inline review card",
+          "url": "https://github.com/openclaw/openclaw/pull/198119",
+          "isDraft": false,
+          "author": { "login": "priya-ui" },
+          "headRefName": "feat/review-card-tz",
+          "headRefOid": "7a88e01f55290c1192b4a7701d83f2a6c9e04112",
+          "mergeStateStatus": "CLEAN",
+          "reviewDecision": "REVIEW_REQUIRED",
+          "reviewRequests": [{ "login": "alex-dev" }],
+          "labels": [{ "name": "ui" }, { "name": "templates" }],
+          "files": [{ "path": "ui/src/pages/templates/inline-review-card.tsx" }],
+          "statusCheckRollup": [
+            { "name": "ci / ui-unit", "status": "COMPLETED", "conclusion": "SUCCESS" }
+          ],
+          "updatedAt": "2026-11-14T07:30:00Z"
+        },
+        {
+          "number": 198133,
+          "title": "refactor(templates): consolidate draft path portability checks",
+          "url": "https://github.com/openclaw/openclaw/pull/198133",
+          "isDraft": false,
+          "author": { "login": "jordan-core" },
+          "headRefName": "refactor/draft-portability",
+          "headRefOid": "5b19d22c8031f4421a90e552c710b99e1a3309d8",
+          "mergeStateStatus": "CLEAN",
+          "reviewDecision": "",
+          "reviewRequests": [],
+          "labels": [],
+          "files": [
+            { "path": "src/templates/draft.ts" },
+            { "path": "skills/create-template/references/draft-format.md" }
+          ],
+          "statusCheckRollup": [
+            { "name": "ci / unit-core", "status": "IN_PROGRESS", "conclusion": "" }
+          ],
+          "updatedAt": "2026-11-14T07:50:00Z"
+        },
+        {
+          "number": 198140,
+          "title": "docs(discord): clarify thread routing example",
+          "url": "https://github.com/openclaw/openclaw/pull/198140",
+          "isDraft": true,
+          "author": { "login": "other-contributor" },
+          "headRefName": "docs/discord-threads",
+          "headRefOid": "11223344556677889900aabbccddeeff00112233",
+          "mergeStateStatus": "CLEAN",
+          "reviewDecision": "",
+          "reviewRequests": [],
+          "labels": [{ "name": "docs" }],
+          "files": [{ "path": "docs/channels/discord.md" }],
+          "statusCheckRollup": [],
+          "updatedAt": "2026-11-14T07:55:00Z"
+        }
+      ]
+    }
+  ]
+}
