@@ -6,7 +6,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
-const WORKSPACE_ROOT = path.resolve(SCRIPT_DIR, "..");
+const WORKSPACE_ROOT = process.env.OPENCLAW_RADAR_WORKSPACE
+  ? path.resolve(process.env.OPENCLAW_RADAR_WORKSPACE)
+  : path.resolve(SCRIPT_DIR, "..");
 const REPO_SLUG_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
 function resolveSafeWorkspacePath(candidatePath, fallbackPath) {
@@ -98,9 +100,10 @@ function deduplicateCheckEntries(rollup) {
   return Array.from(latestByKey.values());
 }
 
-function summarizeChecks(rollup, ignoredCheckNames = []) {
+function summarizeChecks(rollup, ignoredCheckNames = [], rollupState = "") {
   const ignored = new Set(ignoredCheckNames.map((n) => sanitizeDisplayField(n, 60).toLowerCase()));
-  const deduped = deduplicateCheckEntries(rollup);
+  const rawList = Array.isArray(rollup) ? rollup : [];
+  const deduped = deduplicateCheckEntries(rawList);
   const failing = [];
   let pending = 0;
   let passing = 0;
@@ -127,6 +130,15 @@ function summarizeChecks(rollup, ignoredCheckNames = []) {
     } else if (["SUCCESS", "NEUTRAL", "SKIPPED"].includes(conclusion)) {
       passing += 1;
     }
+  }
+  const overall = String(rollupState ?? "").toUpperCase();
+  if (
+    failing.length === 0 &&
+    ignored.size === 0 &&
+    rawList.length >= 100 &&
+    ["FAILURE", "ERROR"].includes(overall)
+  ) {
+    failing.push("check beyond 100-item slice cap");
   }
   const state =
     failing.length > 0 ? "failing" : pending > 0 ? "pending" : passing > 0 ? "passing" : "none";
@@ -165,7 +177,11 @@ function mergePullRequestRecord(existing, incoming) {
     const nextArr = Array.isArray(incoming[arrayField]) ? incoming[arrayField] : [];
     merged[arrayField] = nextArr.length >= prevArr.length ? nextArr : prevArr;
   }
-  if (!incoming.mergeable && existing.mergeable) {
+  if (
+    (!incoming.mergeable || incoming.mergeable === "UNKNOWN") &&
+    existing.mergeable &&
+    existing.mergeable !== "UNKNOWN"
+  ) {
     merged.mergeable = existing.mergeable;
   }
   if (
@@ -174,6 +190,12 @@ function mergePullRequestRecord(existing, incoming) {
     existing.mergeStateStatus !== "UNKNOWN"
   ) {
     merged.mergeStateStatus = existing.mergeStateStatus;
+  }
+  if (!incoming.reviewDecision && existing.reviewDecision) {
+    merged.reviewDecision = existing.reviewDecision;
+  }
+  if (!incoming.rollupState && existing.rollupState) {
+    merged.rollupState = existing.rollupState;
   }
   return merged;
 }
@@ -229,7 +251,7 @@ function classifyPullRequest(repo, pr, config) {
   const mergeState = String(pr?.mergeStateStatus ?? "UNKNOWN").toUpperCase();
   const reviewDecision = String(pr?.reviewDecision ?? "").toUpperCase();
   const ignoredChecks = Array.isArray(config.ignoredChecks) ? config.ignoredChecks : [];
-  const checks = summarizeChecks(pr?.statusCheckRollup, ignoredChecks);
+  const checks = summarizeChecks(pr?.statusCheckRollup, ignoredChecks, pr?.rollupState);
 
   const requestedReviewers = (Array.isArray(pr?.reviewRequests) ? pr.reviewRequests : []).map((r) =>
     normalizeHandle(r?.login ?? r?.name ?? r?.slug),
@@ -273,13 +295,28 @@ function classifyPullRequest(repo, pr, config) {
       tier = "P2";
       if (isCoAuthored && author) reasons.push(`co-authored via @${author}`);
       const awaitingGate =
-        mergeState === "BLOCKED" || reviewDecision === "REVIEW_REQUIRED";
-      if (reviewDecision === "APPROVED" && !awaitingGate) {
+        mergeState === "BLOCKED" ||
+        mergeState === "BEHIND" ||
+        reviewDecision === "REVIEW_REQUIRED";
+      const mergeabilityUnknown =
+        mergeable === "UNKNOWN" || (!mergeable && mergeState === "UNKNOWN");
+      if (mergeabilityUnknown) {
+        reasons.push("checks green; mergeability check pending");
+        nextAction =
+          "Refresh in a few seconds to verify merge conflicts after GitHub finishes computing mergeability";
+      } else if (reviewDecision === "APPROVED" && !awaitingGate) {
         reasons.push("approved & checks green");
         nextAction = "Verify final diff and merge or request maintainer landing";
       } else if (awaitingGate) {
-        reasons.push("checks green; awaiting review or branch gate");
-        nextAction = "Checks are green; await or request maintainer review / merge gate";
+        reasons.push(
+          mergeState === "BEHIND"
+            ? "checks green; branch behind base"
+            : "checks green; awaiting review or branch gate",
+        );
+        nextAction =
+          mergeState === "BEHIND"
+            ? "Update or rebase branch onto base branch, then land"
+            : "Checks are green; await or request maintainer review / merge gate";
       } else {
         reasons.push("mergeable & checks green");
         nextAction = "Verify final diff and merge or request maintainer landing";

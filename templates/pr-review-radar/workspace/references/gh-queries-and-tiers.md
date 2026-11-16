@@ -24,6 +24,13 @@ gh pr list --repo <owner/repo> --search "review-requested:<viewerHandle>" --stat
 gh pr list --repo <owner/repo> --state open --limit 25 \
   --json number,title,url,isDraft,author,headRefName,headRefOid,labels,files,updatedAt,createdAt \
   > state/<slug>-recent.json
+
+# 5) Lazy mergeability & >100-check rollup resolver (resolves transient UNKNOWN mergeable states after main advances)
+node scripts/resolve-mergeability.mjs --repo <owner/repo> \
+  --slice state/<slug>-authored.json \
+  --slice state/<slug>-coauthored.json \
+  --slice state/<slug>-reviews.json \
+  --out state/<slug>-mergeability.json
 ```
 
 Then merge slices into `state/latest-sweep.json` and score in one step:
@@ -34,6 +41,7 @@ node scripts/pr-radar-engine.mjs --mode score \
   --slice <owner/repo>=state/<slug>-coauthored.json \
   --slice <owner/repo>=state/<slug>-reviews.json \
   --slice <owner/repo>=state/<slug>-recent.json \
+  --slice <owner/repo>=state/<slug>-mergeability.json \
   --save-sweep --config state/config.json --cursors state/cursors.json --json
 ```
 
