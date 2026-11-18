@@ -31,6 +31,8 @@ workspace:
       path: scripts/pr-radar-engine.mjs
     - source: workspace/scripts/resolve-mergeability.mjs
       path: scripts/resolve-mergeability.mjs
+    - source: workspace/scripts/watch-and-vet-engine.mjs
+      path: scripts/watch-and-vet-engine.mjs
     - source: workspace/references/gh-queries-and-tiers.md
       path: references/gh-queries-and-tiers.md
     - source: workspace/templates/radar-brief.md

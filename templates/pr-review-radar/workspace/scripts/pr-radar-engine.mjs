@@ -153,20 +153,32 @@ function summarizeChecks(rollup, ignoredCheckNames = [], rollupState = "") {
   };
 }
 
-function findOverlaps(pr, watchedPaths, watchedLabels) {
+function findOverlaps(pr, watchedPaths, watchedLabels, watchedKeywords = []) {
   const files = (Array.isArray(pr?.files) ? pr.files : []).map((f) =>
     typeof f === "string" ? f : String(f?.path ?? ""),
   );
   const labels = (Array.isArray(pr?.labels) ? pr.labels : []).map((l) =>
     (typeof l === "string" ? l : String(l?.name ?? "")).toLowerCase(),
   );
+  const searchableMeta = [
+    sanitizeDisplayField(pr?.title ?? "", 160),
+    sanitizeDisplayField(pr?.headRefName ?? "", 120),
+    ...files,
+    ...labels,
+  ]
+    .join(" ")
+    .toLowerCase();
+
   const matchedPaths = watchedPaths
     .map((p) => sanitizeDisplayField(p, 80))
     .filter((prefix) => prefix && files.some((file) => file.startsWith(prefix)));
   const matchedLabels = watchedLabels
     .map((l) => sanitizeDisplayField(l, 40))
     .filter((label) => label && labels.includes(label.toLowerCase()));
-  return { matchedPaths, matchedLabels };
+  const matchedKeywords = watchedKeywords
+    .map((k) => sanitizeDisplayField(k, 50))
+    .filter((kw) => kw && kw.length >= 2 && searchableMeta.includes(kw.toLowerCase()));
+  return { matchedPaths, matchedLabels, matchedKeywords };
 }
 
 function mergePullRequestRecord(existing, incoming) {
@@ -260,7 +272,8 @@ function classifyPullRequest(repo, pr, config) {
 
   const watchedPaths = Array.isArray(config.watchedPaths) ? config.watchedPaths : [];
   const watchedLabels = Array.isArray(config.watchedLabels) ? config.watchedLabels : [];
-  const overlaps = findOverlaps(pr, watchedPaths, watchedLabels);
+  const watchedKeywords = Array.isArray(config.watchedKeywords) ? config.watchedKeywords : [];
+  const overlaps = findOverlaps(pr, watchedPaths, watchedLabels, watchedKeywords);
 
   let tier = null;
   const reasons = [];
@@ -330,13 +343,20 @@ function classifyPullRequest(repo, pr, config) {
       checks.state === "passing"
         ? "Review diff (CI checks are green)"
         : "Wait for author to resolve pending or failing checks before deep review";
-  } else if (overlaps.matchedPaths.length > 0 || overlaps.matchedLabels.length > 0) {
+  } else if (
+    overlaps.matchedPaths.length > 0 ||
+    overlaps.matchedLabels.length > 0 ||
+    overlaps.matchedKeywords.length > 0
+  ) {
     tier = "P4";
     if (overlaps.matchedPaths.length > 0) {
       reasons.push(`touches watched path (${overlaps.matchedPaths.join(", ")})`);
     }
     if (overlaps.matchedLabels.length > 0) {
       reasons.push(`matches watched label (${overlaps.matchedLabels.join(", ")})`);
+    }
+    if (overlaps.matchedKeywords.length > 0) {
+      reasons.push(`matches focused surface (${overlaps.matchedKeywords.join(", ")})`);
     }
     nextAction = "Skim touched files early to avoid duplicate work or rebase collisions";
   }
@@ -516,6 +536,7 @@ async function main() {
     ok: true,
     mode: opts.mode,
     viewerHandle: normalizeHandle(config.viewerHandle),
+    focusTopic: sanitizeDisplayField(config.focusTopic ?? "", 80) || null,
     repositories: normalizedRepos.map((r) => r.repo),
     totalRanked: ranked.length,
     changedCount,

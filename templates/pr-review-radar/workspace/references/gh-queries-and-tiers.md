@@ -52,8 +52,20 @@ node scripts/pr-radar-engine.mjs --mode score \
 | `P1` | **Unblock Yours Now** | Authored by `viewerHandle` OR co-authored (`commits[].authors` includes `viewerHandle`) AND has non-cancelled failing checks (deduplicated by latest run), `CONFLICTING` / `DIRTY` merge state, or `CHANGES_REQUESTED` review decision | Rebase conflicts, inspect named failing checks/gates, or address requested review changes |
 | `P2` | **Ready to Land** | Authored or co-authored (`commits[].authors`) by `viewerHandle`, not a draft, zero conflicts, and checks passing (distinguishes immediately mergeable PRs from `BLOCKED` / `REVIEW_REQUIRED` branch-gated PRs) | Verify final diff and merge, or await/request maintainer landing |
 | `P3` | **Review Queue Waiting on You** | Not authored by `viewerHandle`, not a draft, and `reviewRequests` explicitly includes `viewerHandle` | Review green, conflict-free PRs first |
-| `P4` | **Subsystem Overlap Watch** | Not authored by `viewerHandle`, touches any prefix in `watchedPaths` or carries a label in `watchedLabels` | Skim touched files early to avoid duplicate work or rebase collisions |
+| `P4` | **Subsystem Overlap Watch** | Not authored by `viewerHandle`, touches any prefix in `watchedPaths`, carries a label in `watchedLabels`, or matches `watchedKeywords` (`focusTopic`) | Skim touched files early to avoid duplicate work or rebase collisions |
 
-## 3. State-Fingerprint Deduplication
+## 3. Tracked PR/Issue Delta Watch & 5-Gate Candidate Vetting (`watch-and-vet-engine.mjs`)
+
+For contributors actively tracking specific PRs/issues and scouting genuinely unclaimed candidate issues, `scripts/watch-and-vet-engine.mjs` provides two read-only workflows:
+
+```bash
+# Run read-only tracked PR/issue delta check + 5-gate candidate issue vetting
+node scripts/watch-and-vet-engine.mjs --mode sweep --config state/config.json --json
+
+# Collect all-time surface evidence (merged PRs, open PRs, open/closed issues, top contributors & paths)
+node scripts/watch-and-vet-engine.mjs --mode collect-surface --topic "subagents" --config state/config.json
+```
+
+## 4. State-Fingerprint Deduplication
 
 `scripts/pr-radar-engine.mjs` deduplicates repeated check runs by latest timestamp, ignores superseded `CANCELLED` workflow runs, and computes a SHA-256 state fingerprint over `tier`, `headRefOid`, `isDraft`, `mergeable`, `mergeStateStatus`, `reviewDecision`, `checks.state`, and `checks.failing`. Scheduled sweeps set `shouldNotify: true` only when at least one `P1`–`P4` pull request is new or changed its structured state fingerprint since `state/cursors.json` was last committed.
