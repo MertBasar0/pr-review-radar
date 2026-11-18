@@ -881,9 +881,10 @@ function New-BadgePill([string]$Text, [string]$BgHex, [string]$BorderHex, [strin
               <Button x:Name="BtnHandoffTarget" Grid.Column="1" Padding="7,3.5" FontSize="10.5" FontWeight="SemiBold" Cursor="Hand" BorderThickness="1" HorizontalContentAlignment="Left"/>
             </Grid>
             <CheckBox x:Name="ChkSendClaim" IsChecked="True" FontSize="10.5" Margin="0,0,0,4"/>
-            <Border x:Name="ClaimCommentBorder" CornerRadius="5" BorderThickness="1" Padding="6,4" Margin="0,0,0,6">
+            <Border x:Name="ClaimCommentBorder" CornerRadius="5" BorderThickness="1" Padding="6,4" Margin="0,0,0,5">
               <TextBox x:Name="TxtClaimComment" Background="Transparent" BorderThickness="0" FontSize="11" AcceptsReturn="True" TextWrapping="Wrap" MaxHeight="48"/>
             </Border>
+            <TextBlock x:Name="HandoffStatusTb" FontSize="10" TextWrapping="Wrap" Margin="0,0,0,5" Visibility="Collapsed"/>
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
               <Button x:Name="BtnCancelHandoff" Padding="9,3.5" Margin="0,0,5,0" FontSize="10.5" FontWeight="SemiBold" Cursor="Hand" BorderThickness="1"/>
               <Button x:Name="BtnConfirmHandoff" Padding="10,3.5" FontSize="10.5" FontWeight="Bold" Cursor="Hand" BorderThickness="1"/>
@@ -966,6 +967,7 @@ $BtnHandoffTarget     = $Window.FindName("BtnHandoffTarget")
 $ChkSendClaim         = $Window.FindName("ChkSendClaim")
 $ClaimCommentBorder   = $Window.FindName("ClaimCommentBorder")
 $TxtClaimComment      = $Window.FindName("TxtClaimComment")
+$HandoffStatusTb      = $Window.FindName("HandoffStatusTb")
 $BtnCancelHandoff     = $Window.FindName("BtnCancelHandoff")
 $BtnConfirmHandoff    = $Window.FindName("BtnConfirmHandoff")
 $CardsStack           = $Window.FindName("CardsStack")
@@ -1068,8 +1070,11 @@ function Get-SelectedHandoffAgentObject {
 }
 
 function Open-HandoffConfirmDialog($Candidate) {
+  Reload-LocalAuxState
   $L = Get-LangTable
   $script:PendingHandoffCandidate = $Candidate
+  $script:HandoffInlineError = ""
+  $script:HandoffProgressText = ""
   $HandoffHeaderTb.Text = ($L.HandoffHeader -f $Candidate.number)
   $defaultClaim = "I'm looking into this and working on a root-cause fix."
   if ($script:ConfigObj -and $script:ConfigObj.handoff -and $script:ConfigObj.handoff.defaultClaimComment) {
@@ -1816,9 +1821,20 @@ function Update-HudView {
     $ClaimCommentBorder.Background = ConvertFrom-BrushHex $Pal.InputBg
     $ClaimCommentBorder.BorderBrush = ConvertFrom-BrushHex $Pal.InputBorder
     $ClaimCommentBorder.Opacity = if ($ChkSendClaim.IsChecked) { 1.0 } else { 0.45 }
-    $TxtClaimComment.IsEnabled = [bool]$ChkSendClaim.IsChecked
+    $TxtClaimComment.IsEnabled = ([bool]$ChkSendClaim.IsChecked -and -not $script:IsLaunchingHandoff)
     $TxtClaimComment.Foreground = ConvertFrom-BrushHex $Pal.TitleFg
     $TxtClaimComment.CaretBrush = ConvertFrom-BrushHex $Pal.TitleFg
+    if ($script:HandoffInlineError) {
+      $HandoffStatusTb.Visibility = [System.Windows.Visibility]::Visible
+      $HandoffStatusTb.Foreground = ConvertFrom-BrushHex $Pal.BadgeFailFg
+      $HandoffStatusTb.Text = "⚠️ $($script:HandoffInlineError)"
+    } elseif ($script:IsLaunchingHandoff -and $script:HandoffProgressText) {
+      $HandoffStatusTb.Visibility = [System.Windows.Visibility]::Visible
+      $HandoffStatusTb.Foreground = ConvertFrom-BrushHex $Pal.TileCandFg
+      $HandoffStatusTb.Text = "⏳ $($script:HandoffProgressText)"
+    } else {
+      $HandoffStatusTb.Visibility = [System.Windows.Visibility]::Collapsed
+    }
     $BtnCancelHandoff.Content = $L.HandoffCancelBtn
     $BtnCancelHandoff.IsEnabled = (-not $script:IsLaunchingHandoff)
     Set-StyledButton $BtnCancelHandoff $Pal.ActionBtnBg $Pal.ActionBtnBorder $Pal.ActionBtnFg
@@ -1925,6 +1941,64 @@ function Update-HudView {
   $TileP34Label.Foreground = ConvertFrom-BrushHex $Pal.TileP34Fg
 
   if ($script:ActiveFilter -eq "CAND") {
+    # Quick direct #Issue handoff bar (launch handoff on any issue number, even if already claimed)
+    $directGrid = [System.Windows.Controls.Grid]::new()
+    $directGrid.Margin = [System.Windows.Thickness]::new(0, 2, 0, 6)
+    $dc0 = [System.Windows.Controls.ColumnDefinition]::new()
+    $dc0.Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
+    $dc1 = [System.Windows.Controls.ColumnDefinition]::new()
+    $dc1.Width = [System.Windows.GridLength]::Auto
+    [void]$directGrid.ColumnDefinitions.Add($dc0)
+    [void]$directGrid.ColumnDefinitions.Add($dc1)
+
+    $directBorder = [System.Windows.Controls.Border]::new()
+    $directBorder.Background = ConvertFrom-BrushHex $Pal.InputBg
+    $directBorder.BorderBrush = ConvertFrom-BrushHex $Pal.InputBorder
+    $directBorder.BorderThickness = [System.Windows.Thickness]::new(1)
+    $directBorder.CornerRadius = [System.Windows.CornerRadius]::new(6)
+    $directBorder.Padding = [System.Windows.Thickness]::new(7, 3, 7, 3)
+    $directBorder.Margin = [System.Windows.Thickness]::new(0, 0, 4, 0)
+
+    $directTb = [System.Windows.Controls.TextBox]::new()
+    $directTb.Background = [System.Windows.Media.Brushes]::Transparent
+    $directTb.BorderThickness = [System.Windows.Thickness]::new(0)
+    $directTb.Foreground = ConvertFrom-BrushHex $Pal.TitleFg
+    $directTb.CaretBrush = ConvertFrom-BrushHex $Pal.TitleFg
+    $directTb.FontSize = 11
+    $directTb.ToolTip = if ((Get-EffectiveLang) -eq "tr") { "Doğrudan issue numarası veya URL girin (örn: 201468)" } else { "Enter issue number or URL directly (e.g. 201468)" }
+    $directBorder.Child = $directTb
+    [System.Windows.Controls.Grid]::SetColumn($directBorder, 0)
+    [void]$directGrid.Children.Add($directBorder)
+
+    $directBtn = [System.Windows.Controls.Button]::new()
+    $directBtn.Content = if ((Get-EffectiveLang) -eq "tr") { "🚀 #Issue Başlat" } else { "🚀 #Issue Handoff" }
+    $directBtn.FontSize = 10
+    $directBtn.FontWeight = [System.Windows.FontWeights]::Bold
+    $directBtn.Padding = [System.Windows.Thickness]::new(8, 3.5, 8, 3.5)
+    $directBtn.BorderThickness = [System.Windows.Thickness]::new(1)
+    $directBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+    Set-StyledButton $directBtn $Pal.PrimaryBtnBg $Pal.PrimaryBtnBorder $Pal.PrimaryBtnFg
+    $openDirectFn = {
+      $rawVal = $directTb.Text.Trim()
+      if ($rawVal -match "(\d+)\s*$") {
+        $num = [int]$Matches[1]
+        $defRepo = if ($script:ConfigObj -and $script:ConfigObj.watch -and $script:ConfigObj.watch.repo) { [string]$script:ConfigObj.watch.repo } elseif ($script:ConfigObj -and $script:ConfigObj.repositories -and @($script:ConfigObj.repositories).Count -gt 0) { [string]$script:ConfigObj.repositories[0] } else { "openclaw/openclaw" }
+        Open-HandoffConfirmDialog ([pscustomobject]@{ number = $num; repo = $defRepo })
+        Update-HudView
+      }
+    }.GetNewClosure()
+    $directBtn.Add_Click($openDirectFn)
+    $directTb.Add_KeyDown({
+      param($s, $ev)
+      if ($ev.Key -eq [System.Windows.Input.Key]::Return) {
+        $ev.Handled = $true
+        & $openDirectFn
+      }
+    }.GetNewClosure())
+    [System.Windows.Controls.Grid]::SetColumn($directBtn, 1)
+    [void]$directGrid.Children.Add($directBtn)
+    [void]$CardsStack.Children.Add($directGrid)
+
     $sessionsList = if ($script:ActiveSessions) { @($script:ActiveSessions) } else { @() }
     if ($sessionsList.Count -gt 0) {
       Add-SectionHeader ($L.SecActiveHandoffs -f $sessionsList.Count) $Pal.TileP2Fg
@@ -2306,19 +2380,25 @@ function Start-CandidateHandoffLaunch {
   $sendClaim = [bool]$ChkSendClaim.IsChecked
   $claimBody = $TxtClaimComment.Text.Trim()
 
+  $handoffsDir = Join-Path $StateDir "handoffs"
+  if (-not (Test-Path $handoffsDir)) { New-Item -ItemType Directory -Path $handoffsDir -Force | Out-Null }
+  $progressPath = Join-Path $handoffsDir "launch-progress.json"
+  Remove-Item -LiteralPath $progressPath -Force -ErrorAction SilentlyContinue
+
   $claimFile = ""
   if ($sendClaim -and $claimBody.Length -gt 0) {
-    $handoffsDir = Join-Path $StateDir "handoffs"
-    if (-not (Test-Path $handoffsDir)) { New-Item -ItemType Directory -Path $handoffsDir -Force | Out-Null }
     $claimFile = Join-Path $handoffsDir "claim-comment-$($cand.number).txt"
     Set-Content -LiteralPath $claimFile -Value $claimBody -Encoding utf8 -NoNewline
   }
 
+  $script:HandoffInlineError = ""
+  $script:HandoffProgressText = if ((Get-EffectiveLang) -eq "tr") { "[1/4] #$($cand.number) doğrulanıyor..." } else { "[1/4] Verifying #$($cand.number)..." }
   $script:IsLaunchingHandoff = $true
   Update-HudView
 
   $script:HandoffJob = Start-Job -ScriptBlock {
     param($RootDirInner, $HandoffScriptInner, $RepoInner, $IssueNumInner, $AgentIdInner, $ClaimFileInner, $SendClaimInner)
+    $ErrorActionPreference = "Continue"
     $env:OPENCLAW_RADAR_WORKSPACE = $RootDirInner
     $argsList = @($HandoffScriptInner, "--mode", "launch", "--repo", $RepoInner, "--issue", "$IssueNumInner", "--agent-id", $AgentIdInner)
     if ($SendClaimInner -and $ClaimFileInner) {
@@ -2326,8 +2406,14 @@ function Start-CandidateHandoffLaunch {
     } else {
       $argsList += @("--no-claim")
     }
-    $out = & node @argsList 2>&1
-    return ($out -join "`n")
+    $errFile = Join-Path $RootDirInner "state\handoffs\launcher-stderr-$IssueNumInner.log"
+    $stdoutLines = & node @argsList 2>$errFile
+    $joined = ($stdoutLines | ForEach-Object { "$_" }) -join "`n"
+    if (-not $joined.Trim() -and (Test-Path -LiteralPath $errFile)) {
+      $errRaw = (Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue)
+      return (@{ ok = $false; message = $errRaw } | ConvertTo-Json -Compress)
+    }
+    return $joined
   } -ArgumentList $HudRoot, $HandoffScript, ([string]$cand.repo), ([int]$cand.number), $agentId, $claimFile, $sendClaim
 }
 
@@ -2528,6 +2614,20 @@ $PollTimer.Add_Tick({
       $FooterStatus.Text = ($L.FooterUpdated -f (Get-Date -Format 'HH:mm'))
     }
   }
+  if ($script:IsLaunchingHandoff) {
+    $progPath = Join-Path $StateDir "handoffs\launch-progress.json"
+    $progObj = Read-JsonFileSafe $progPath
+    if ($progObj -and $progObj.detail) {
+      $nextProg = "[$($progObj.step)] $($progObj.detail)"
+      if ($nextProg -ne $script:HandoffProgressText) {
+        $script:HandoffProgressText = $nextProg
+        $HandoffStatusTb.Visibility = [System.Windows.Visibility]::Visible
+        $HandoffStatusTb.Foreground = ConvertFrom-BrushHex $Palettes[$script:CurrentTheme].TileCandFg
+        $HandoffStatusTb.Text = "⏳ $nextProg"
+        $FooterStatus.Text = $nextProg
+      }
+    }
+  }
   if ($script:HandoffJob -and $script:HandoffJob.State -in @("Completed", "Failed", "Stopped")) {
     $L = Get-LangTable
     $rawOut = ""
@@ -2535,16 +2635,23 @@ $PollTimer.Add_Tick({
     Remove-Job -Job $script:HandoffJob -Force -ErrorAction SilentlyContinue
     $script:HandoffJob = $null
     $script:IsLaunchingHandoff = $false
+    $script:HandoffProgressText = ""
     $resObj = $null
-    try { $resObj = $rawOut | ConvertFrom-Json } catch {}
+    try {
+      $idx = $rawOut.IndexOf("{")
+      if ($idx -ge 0) { $resObj = $rawOut.Substring($idx) | ConvertFrom-Json }
+    } catch {}
     if ($resObj -and $resObj.ok) {
       $script:PendingHandoffCandidate = $null
+      $script:HandoffInlineError = ""
       Reload-LocalAuxState
       Update-HudView
       $FooterStatus.Text = ($L.HandoffLaunchedMsg -f $resObj.issueNumber, $resObj.agentLabel, $resObj.handoffId)
     } else {
-      Update-HudView
       $msg = if ($resObj -and $resObj.message) { [string]$resObj.message } elseif ($rawOut) { $rawOut } else { $L.FooterFailed }
+      $script:HandoffInlineError = $msg
+      Reload-LocalAuxState
+      Update-HudView
       $FooterStatus.Text = ($L.FooterError -f $msg)
     }
   }

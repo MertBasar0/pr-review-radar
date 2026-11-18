@@ -29,7 +29,10 @@ async function updateActiveIndex(indexFile, entry) {
     if (Array.isArray(raw)) list = raw;
   } catch {}
   const filtered = list.filter(
-    (item) => item.handoffId !== entry.handoffId && item.requestId !== entry.requestId,
+    (item) =>
+      item.handoffId !== entry.handoffId &&
+      item.requestId !== entry.requestId &&
+      Number(item.issueNumber) !== Number(entry.issueNumber),
   );
   filtered.unshift(entry);
   await writeStatusAtomic(indexFile, filtered.slice(0, 25));
@@ -47,6 +50,7 @@ async function main() {
     repo,
     envelope,
     worktreeName,
+    displayWorktreePath,
     statusFile,
     indexFile,
   } = job;
@@ -59,6 +63,7 @@ async function main() {
     repo,
     targetId,
     targetLabel,
+    worktreePath: displayWorktreePath || null,
     requestId: envelope.requestId,
     startedAt,
     updatedAt: startedAt,
@@ -73,58 +78,73 @@ async function main() {
       targetId,
       envelope,
       worktreeName: worktreeName || undefined,
-      waitBudgetMs: 500,
+      waitBudgetMs: 1_000,
       maxAutonomousTurns: 8,
     });
 
-    const worktreePath =
-      worktreeName && (bridgeConfig.targets?.[targetId]?.transport === "codex" || bridgeConfig.targets?.[targetId]?.transport === "acp")
+    const resolvedWtPath =
+      displayWorktreePath ||
+      (worktreeName &&
+      (bridgeConfig.targets?.[targetId]?.transport === "codex" ||
+        bridgeConfig.targets?.[targetId]?.transport === "acp")
         ? path.join(bridgeConfig.dataDir, "worktrees", `${result.handoffId}-${worktreeName}`)
+        : null);
+
+    const resolvePhase = (res) => {
+      if (res.lifecycleStatus === "failed") return "failed";
+      const act = res.orchestratorDirective?.action;
+      if (act === "POLL_ATTACH" || res.lifecycleStatus === "running") return "running";
+      return "settled";
+    };
+
+    const buildRecord = (res) => {
+      const dir = res.orchestratorDirective;
+      const notes = Array.isArray(res.observed?.verificationNotes)
+        ? res.observed.verificationNotes.join("; ")
         : null;
+      const phaseName = resolvePhase(res);
+      return {
+        ok: phaseName !== "failed",
+        phase: phaseName,
+        handoffId: res.handoffId,
+        requestId: envelope.requestId,
+        issueNumber,
+        repo,
+        targetId,
+        targetLabel,
+        lifecycleStatus: res.lifecycleStatus,
+        runId: res.runId ?? null,
+        remoteSessionKey: res.remoteSessionKey ?? null,
+        remoteSessionUrl: res.remoteSessionUrl ?? null,
+        worktreeName: worktreeName || `issue-${issueNumber}`,
+        worktreePath: resolvedWtPath,
+        directiveAction: dir?.action ?? null,
+        directiveReason: dir?.reason ?? null,
+        summary: res.reported?.summaryDelta ?? null,
+        headSha: res.reported?.candidateCommitSha ?? res.observed?.observedHeadSha ?? null,
+        errorMessage: phaseName === "failed" ? notes || dir?.reason || "Target run failed" : null,
+        startedAt,
+        updatedAt: new Date().toISOString(),
+      };
+    };
 
-    const buildRecord = (phaseName, res) => ({
-      ok: res.lifecycleStatus !== "failed",
-      phase: phaseName,
-      handoffId: res.handoffId,
-      requestId: res.requestId,
-      issueNumber,
-      repo,
-      targetId,
-      targetLabel,
-      lifecycleStatus: res.lifecycleStatus,
-      dispatchState: res.turn?.dispatchState ?? null,
-      remoteSessionKey: res.remoteSessionKey ?? null,
-      remoteSessionUrl: res.remoteSessionUrl ?? null,
-      worktreeName: worktreeName || null,
-      worktreePath,
-      directiveAction: res.directive?.action ?? null,
-      directiveReason: res.directive?.reason ?? null,
-      summary: res.reported?.summary ?? null,
-      headSha: res.reported?.headSha ?? null,
-      startedAt,
-      updatedAt: new Date().toISOString(),
-    });
-
-    const initialRec = buildRecord(
-      result.directive?.action === "POLL_ATTACH" ? "running" : "settled",
-      result,
-    );
+    const initialRec = buildRecord(result);
     await writeStatusAtomic(statusFile, initialRec);
     await updateActiveIndex(indexFile, initialRec);
 
     const maxRuntimeMs = 45 * 60 * 1000;
     const deadline = Date.now() + maxRuntimeMs;
 
-    while (result.directive?.action === "POLL_ATTACH" && Date.now() < deadline) {
-      await delay(1_500);
+    while (
+      result.orchestratorDirective?.action === "POLL_ATTACH" &&
+      Date.now() < deadline
+    ) {
+      await delay(2_000);
       result = await bridge.attachHandoff({
         handoffId: result.handoffId,
         waitBudgetMs: 25_000,
       });
-      const rec = buildRecord(
-        result.directive?.action === "POLL_ATTACH" ? "running" : "settled",
-        result,
-      );
+      const rec = buildRecord(result);
       await writeStatusAtomic(statusFile, rec);
       await updateActiveIndex(indexFile, rec);
     }
@@ -136,6 +156,7 @@ async function main() {
       repo,
       targetId,
       targetLabel,
+      worktreePath: displayWorktreePath || null,
       requestId: envelope.requestId,
       errorCode: err?.code ?? "WORKER_ERROR",
       errorMessage: err instanceof Error ? err.message : String(err),
