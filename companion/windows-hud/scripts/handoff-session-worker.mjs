@@ -1,9 +1,53 @@
 #!/usr/bin/env node
 
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
+
+function extractOpenClawSessionTarget(bridgeConfig, targetId) {
+  const target = bridgeConfig?.targets?.[targetId];
+  const args = Array.isArray(target?.args) ? target.args : [];
+  const idx = args.indexOf("--session");
+  if (idx >= 0 && typeof args[idx + 1] === "string" && args[idx + 1].startsWith("agent:")) {
+    return {
+      command: target?.command || "openclaw",
+      sessionKey: args[idx + 1],
+    };
+  }
+  return null;
+}
+
+function parseHandoffResultBlock(messages) {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const m = messages[i];
+    if (m?.role !== "assistant") continue;
+    const text = Array.isArray(m.content)
+      ? m.content.map((c) => c?.text || "").join("\n")
+      : String(m.content || m.text || "");
+    const fence = /```handoff-result\s*([\s\S]*?)```/i.exec(text);
+    if (fence) {
+      try {
+        const parsed = JSON.parse(fence[1].trim());
+        return {
+          summary: parsed.summaryDelta || null,
+          headSha: parsed.candidateCommitSha || null,
+        };
+      } catch {}
+    }
+    if (text.trim()) {
+      return {
+        summary: text.trim().replace(/\s+/g, " ").slice(0, 280),
+        headSha: null,
+      };
+    }
+  }
+  return { summary: null, headSha: null };
+}
 
 async function writeStatusAtomic(filePath, payload) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
@@ -12,13 +56,20 @@ async function writeStatusAtomic(filePath, payload) {
   await fs.rename(tmp, filePath);
 }
 
-function parseJobArg(argv) {
+function parseWorkerArgs(argv) {
+  let jobPath = "";
+  let attachHandoffId = "";
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === "--job-file" && argv[i + 1]) {
-      return path.resolve(argv[i + 1]);
+      jobPath = path.resolve(argv[++i]);
+    } else if (argv[i] === "--attach-handoff-id" && argv[i + 1]) {
+      attachHandoffId = argv[++i].trim();
     }
   }
-  throw new Error("Missing --job-file <path>");
+  if (!jobPath) {
+    throw new Error("Missing --job-file <path>");
+  }
+  return { jobPath, attachHandoffId };
 }
 
 async function updateActiveIndex(indexFile, entry) {
@@ -39,7 +90,7 @@ async function updateActiveIndex(indexFile, entry) {
 }
 
 async function main() {
-  const jobPath = parseJobArg(process.argv.slice(2));
+  const { jobPath, attachHandoffId: cliAttachId } = parseWorkerArgs(process.argv.slice(2));
   const job = JSON.parse(await fs.readFile(jobPath, "utf8"));
   const {
     clawhandoffEntry,
@@ -54,33 +105,46 @@ async function main() {
     statusFile,
     indexFile,
   } = job;
+  const resumeHandoffId = cliAttachId || job.attachHandoffId || "";
 
-  const startedAt = new Date().toISOString();
-  await writeStatusAtomic(statusFile, {
-    ok: true,
-    phase: "starting",
-    issueNumber,
-    repo,
-    targetId,
-    targetLabel,
-    worktreePath: displayWorktreePath || null,
-    requestId: envelope.requestId,
-    startedAt,
-    updatedAt: startedAt,
-  });
+  let startedAt = new Date().toISOString();
+  if (resumeHandoffId) {
+    try {
+      const prev = JSON.parse(await fs.readFile(statusFile, "utf8"));
+      if (prev?.startedAt) startedAt = prev.startedAt;
+    } catch {}
+  } else {
+    await writeStatusAtomic(statusFile, {
+      ok: true,
+      phase: "starting",
+      issueNumber,
+      repo,
+      targetId,
+      targetLabel,
+      worktreePath: displayWorktreePath || null,
+      requestId: envelope.requestId,
+      startedAt,
+      updatedAt: startedAt,
+    });
+  }
 
   const modUrl = pathToFileURL(path.resolve(clawhandoffEntry)).href;
   const { BridgeService } = await import(modUrl);
   const bridge = new BridgeService(bridgeConfig);
 
   try {
-    let result = await bridge.startHandoff({
-      targetId,
-      envelope,
-      worktreeName: worktreeName || undefined,
-      waitBudgetMs: 1_000,
-      maxAutonomousTurns: 8,
-    });
+    let result = resumeHandoffId
+      ? await bridge.attachHandoff({
+          handoffId: resumeHandoffId,
+          waitBudgetMs: 25_000,
+        })
+      : await bridge.startHandoff({
+          targetId,
+          envelope,
+          worktreeName: worktreeName || undefined,
+          waitBudgetMs: 1_000,
+          maxAutonomousTurns: 8,
+        });
 
     const resolvedWtPath =
       displayWorktreePath ||
@@ -129,10 +193,14 @@ async function main() {
     };
 
     const initialRec = buildRecord(result);
-    await writeStatusAtomic(statusFile, initialRec);
-    await updateActiveIndex(indexFile, initialRec);
+    const ocSession = extractOpenClawSessionTarget(bridgeConfig, targetId);
 
-    const maxRuntimeMs = 45 * 60 * 1000;
+    if (result.lifecycleStatus !== "uncertain" || !ocSession) {
+      await writeStatusAtomic(statusFile, initialRec);
+      await updateActiveIndex(indexFile, initialRec);
+    }
+
+    const maxRuntimeMs = 3 * 60 * 60 * 1000;
     const deadline = Date.now() + maxRuntimeMs;
 
     while (
@@ -144,9 +212,80 @@ async function main() {
         handoffId: result.handoffId,
         waitBudgetMs: 25_000,
       });
+      if (result.lifecycleStatus === "uncertain" && ocSession) {
+        break;
+      }
       const rec = buildRecord(result);
       await writeStatusAtomic(statusFile, rec);
       await updateActiveIndex(indexFile, rec);
+    }
+
+    if (result.lifecycleStatus === "uncertain" && ocSession) {
+      while (Date.now() < deadline) {
+        try {
+          const { stdout: descOut } = await execFileAsync(
+            ocSession.command,
+            [
+              "gateway",
+              "call",
+              "sessions.describe",
+              "--params",
+              JSON.stringify({ key: ocSession.sessionKey }),
+              "--json",
+            ],
+            { timeout: 15_000, windowsHide: true },
+          );
+          const desc = JSON.parse(descOut);
+          const sessStatus = desc?.session?.status;
+          if (sessStatus === "running") {
+            const liveRec = {
+              ...initialRec,
+              ok: true,
+              phase: "running",
+              lifecycleStatus: "running",
+              directiveAction: "POLL_ATTACH",
+              directiveReason: "Gateway session is actively running.",
+              updatedAt: new Date().toISOString(),
+            };
+            await writeStatusAtomic(statusFile, liveRec);
+            await updateActiveIndex(indexFile, liveRec);
+            await delay(15_000);
+            continue;
+          }
+          const { stdout: histOut } = await execFileAsync(
+            ocSession.command,
+            [
+              "gateway",
+              "call",
+              "chat.history",
+              "--params",
+              JSON.stringify({ sessionKey: ocSession.sessionKey, limit: 4 }),
+              "--json",
+            ],
+            { timeout: 15_000, windowsHide: true },
+          ).catch(() => ({ stdout: "{}" }));
+          const hist = JSON.parse(histOut || "{}");
+          const extracted = parseHandoffResultBlock(hist?.messages || []);
+          const failed = sessStatus === "failed" || sessStatus === "killed";
+          const doneRec = {
+            ...initialRec,
+            ok: !failed,
+            phase: failed ? "failed" : "settled",
+            lifecycleStatus: failed ? "failed" : "settled",
+            directiveAction: failed ? "ESCALATE_TO_HUMAN" : "CONTINUE_AUTONOMOUSLY",
+            directiveReason: null,
+            summary: extracted.summary,
+            headSha: extracted.headSha,
+            errorMessage: failed ? `Gateway session ended with status: ${sessStatus}` : null,
+            updatedAt: new Date().toISOString(),
+          };
+          await writeStatusAtomic(statusFile, doneRec);
+          await updateActiveIndex(indexFile, doneRec);
+          break;
+        } catch {
+          await delay(15_000);
+        }
+      }
     }
   } catch (err) {
     const errRec = {

@@ -605,7 +605,7 @@ async function resolveBaseShaAndPrepareWorktree(repo, localRepoPath, issueNumber
         await execFileAsync(
           "git",
           ["-C", localRepoPath, "worktree", "add", "--detach", winWorktreePath, verifiedSha],
-          { timeout: 120_000, windowsHide: true },
+          { timeout: 600_000, windowsHide: true },
         );
       }
     }
@@ -736,6 +736,111 @@ function buildHandoffArtifacts({
   return { envelope, markdown };
 }
 
+function isProcessAlive(pid) {
+  const num = Number(pid);
+  if (!Number.isInteger(num) || num <= 0) return false;
+  try {
+    process.kill(num, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function acquireIssueLaunchLock(handoffsDir, issueNumber) {
+  await fs.mkdir(handoffsDir, { recursive: true });
+  const lockPath = path.join(handoffsDir, `launch-lock-issue-${issueNumber}.json`);
+  const existing = await readJsonOrDefault(lockPath, null);
+  if (existing?.pid && existing.pid !== process.pid) {
+    const ageMs = Date.now() - (Date.parse(existing.startedAt || "") || 0);
+    if (ageMs >= 0 && ageMs < 12 * 60 * 1000 && isProcessAlive(existing.pid)) {
+      return { acquired: false, lockPath, existing };
+    }
+  }
+  await writeJsonAtomic(lockPath, {
+    pid: process.pid,
+    issueNumber,
+    startedAt: new Date().toISOString(),
+  });
+  return {
+    acquired: true,
+    lockPath,
+    release: async () => {
+      const cur = await readJsonOrDefault(lockPath, null);
+      if (!cur || cur.pid === process.pid) {
+        await fs.unlink(lockPath).catch(() => {});
+      }
+    },
+  };
+}
+
+async function spawnWorkerProcess({ runtime, jobFile, workerLogFile, issueNumber, attachHandoffId = "" }) {
+  const extraArg = attachHandoffId ? ` --attach-handoff-id "${attachHandoffId}"` : "";
+  if (runtime === "wsl") {
+    const wslWorker = await toWslPath(WORKER_SCRIPT);
+    const wslJob = await toWslPath(jobFile);
+    const wslLog = await toWslPath(workerLogFile);
+    const unitName = `clawhandoff-issue-${issueNumber}-${Date.now()}`;
+    const innerCmd = [
+      'export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH";',
+      'for d in "$HOME"/.ocm/envs/daily/.openclaw "$HOME"/.ocm/envs/*/.openclaw "$HOME"/.openclaw; do',
+      '  if [ -d "$d" ] && [ -f "$d/openclaw.json" ]; then export OPENCLAW_STATE_DIR="$d"; break; fi;',
+      "done;",
+      `exec node "${wslWorker}" --job-file "${wslJob}"${extraArg} >>"${wslLog}" 2>&1`,
+    ].join(" ");
+    await execFileAsync(
+      "wsl.exe",
+      [
+        "-e",
+        "bash",
+        "-lc",
+        `systemd-run --user --collect --unit="${unitName}" bash -lc '${innerCmd.replace(/'/g, "'\\''")}'`,
+      ],
+      { timeout: 10_000, windowsHide: true },
+    ).catch(() => {
+      const child = spawn("wsl.exe", ["-e", "bash", "-lc", innerCmd], {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      child.unref();
+    });
+    return;
+  }
+
+  const extraArgArr = attachHandoffId ? ["--attach-handoff-id", attachHandoffId] : [];
+  if (process.platform === "win32") {
+    const cmdLine = `"${process.execPath}" "${WORKER_SCRIPT}" --job-file "${jobFile}"${extraArg}`;
+    await execFileAsync(
+      "pwsh",
+      [
+        "-NoProfile",
+        "-Command",
+        `$si = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16]0 }; Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = '${cmdLine.replace(/'/g, "''")}'; ProcessStartupInformation = $si } | Out-Null`,
+      ],
+      { timeout: 10_000, windowsHide: true },
+    ).catch(async () => {
+      const logFd = await fs.open(workerLogFile, "a");
+      const child = spawn(process.execPath, [WORKER_SCRIPT, "--job-file", jobFile, ...extraArgArr], {
+        detached: true,
+        stdio: ["ignore", logFd.fd, logFd.fd],
+        windowsHide: true,
+      });
+      child.unref();
+      await logFd.close().catch(() => {});
+    });
+  } else {
+    const logFd = await fs.open(workerLogFile, "a");
+    const child = spawn(process.execPath, [WORKER_SCRIPT, "--job-file", jobFile, ...extraArgArr], {
+      detached: true,
+      stdio: ["ignore", logFd.fd, logFd.fd],
+      windowsHide: true,
+    });
+    child.unref();
+    await logFd.close().catch(() => {});
+  }
+}
+
 async function launchHandoffFlow(opts, config) {
   const clawhandoffEntry = resolveClawhandoffEntry(config);
   if (!clawhandoffEntry) {
@@ -754,6 +859,64 @@ async function launchHandoffFlow(opts, config) {
       message: "Repo ve issue numarası gerekli.",
     };
   }
+
+  const handoffsDir = path.join(HUD_ROOT, "state", "handoffs");
+  await fs.mkdir(handoffsDir, { recursive: true });
+  const statusFile = path.join(handoffsDir, `session-issue-${opts.issue}.json`);
+  const jobFile = path.join(handoffsDir, `job-issue-${opts.issue}.json`);
+  const workerLogFile = path.join(handoffsDir, `worker-issue-${opts.issue}.log`);
+
+  let lock = null;
+  if (!opts.dryRun) {
+    lock = await acquireIssueLaunchLock(handoffsDir, opts.issue);
+    if (!lock.acquired) {
+      return {
+        ok: false,
+        code: "LAUNCH_IN_PROGRESS",
+        message: `#${opts.issue} için başlatma işlemi zaten arka planda devam ediyor (PID ${lock.existing?.pid}). Lütfen mevcut adımın bitmesini bekleyin.`,
+      };
+    }
+  }
+
+  try {
+    if (!opts.dryRun) {
+      const existingSession = await readJsonOrDefault(statusFile, null);
+      const startedAgeMs =
+        Date.now() - (Date.parse(existingSession?.startedAt || "") || 0);
+      const updatedAgeMs =
+        Date.now() - (Date.parse(existingSession?.updatedAt || "") || 0);
+      if (
+        existingSession?.phase === "running" &&
+        existingSession?.handoffId &&
+        startedAgeMs >= 0 &&
+        startedAgeMs < 3 * 60 * 60 * 1000
+      ) {
+        if (updatedAgeMs > 60_000 && existsSync(jobFile)) {
+          const runtimeGuess = String(existingSession.targetId || "").startsWith("wsl-")
+            ? "wsl"
+            : process.platform;
+          await spawnWorkerProcess({
+            runtime: runtimeGuess,
+            jobFile,
+            workerLogFile,
+            issueNumber: opts.issue,
+            attachHandoffId: existingSession.handoffId,
+          }).catch(() => {});
+        }
+        return {
+          ok: true,
+          alreadyRunning: true,
+          issueNumber: opts.issue,
+          repo,
+          agentLabel: existingSession.targetLabel || "OpenClaw",
+          handoffId: existingSession.handoffId,
+          worktreePath: existingSession.worktreePath || null,
+          commentPosted: false,
+          alreadyClaimedByViewer: true,
+          commentUrl: null,
+        };
+      }
+    }
 
   await reportProgress(opts.issue, "1/4", `#${opts.issue} yarış ve temsilci durumu kontrol ediliyor...`);
 
@@ -869,233 +1032,173 @@ async function launchHandoffFlow(opts, config) {
     runtimeWorktreePath: runtimeCwd,
   });
 
-  const handoffsDir = path.join(HUD_ROOT, "state", "handoffs");
-  await fs.mkdir(handoffsDir, { recursive: true });
-  const envelopePath = path.join(handoffsDir, `issue-${opts.issue}-envelope.json`);
-  const markdownPath = path.join(handoffsDir, `issue-${opts.issue}-handoff.md`);
-  const statusFile = path.join(handoffsDir, `session-issue-${opts.issue}.json`);
-  const indexFile = path.join(handoffsDir, `active-sessions.json`);
-  const jobFile = path.join(handoffsDir, `job-issue-${opts.issue}.json`);
-  const workerLogFile = path.join(handoffsDir, `worker-issue-${opts.issue}.log`);
+    const envelopePath = path.join(handoffsDir, `issue-${opts.issue}-envelope.json`);
+    const markdownPath = path.join(handoffsDir, `issue-${opts.issue}-handoff.md`);
+    const indexFile = path.join(handoffsDir, `active-sessions.json`);
 
-  await writeJsonAtomic(envelopePath, envelope);
-  await fs.writeFile(markdownPath, markdown, "utf8");
+    await writeJsonAtomic(envelopePath, envelope);
+    await fs.writeFile(markdownPath, markdown, "utf8");
 
-  // 4) Build BridgeConfig & launch detached worker (foreground exec inside detached wsl.exe so WSL never kills it!)
-  await reportProgress(
-    opts.issue,
-    "4/4",
-    `#${opts.issue} üzerinde ${chosenAgent.label} oturumu başlatılıyor...`,
-  );
+    // 4) Build BridgeConfig & launch detached worker
+    await reportProgress(
+      opts.issue,
+      "4/4",
+      `#${opts.issue} üzerinde ${chosenAgent.label} oturumu başlatılıyor...`,
+    );
 
-  let bridgeConfig;
-  let targetId;
-  if (chosenAgent.fromBridgeConfigPath) {
-    const rawBridge = await readJsonOrDefault(chosenAgent.fromBridgeConfigPath, {});
-    targetId = chosenAgent.bridgeTargetKey;
-    bridgeConfig = {
-      dataDir: rawBridge.dataDir || path.join(os.homedir(), ".clawhandoff"),
-      defaultPublisherOwner: "remote_gated",
-      targets: {
-        [targetId]: rawBridge.targets[targetId],
-      },
-    };
-  } else {
-    targetId = chosenAgent.targetConfig?.targetId || chosenAgent.id;
-    let dataDir = path.join(os.homedir(), ".clawhandoff");
-    if (chosenAgent.runtime === "wsl") {
-      const { stdout: wslHomeOut } = await execFileAsync(
-        "wsl.exe",
-        ["-e", "bash", "-lc", 'printf "%s" "$HOME/.clawhandoff"'],
-        { timeout: 5_000, windowsHide: true },
-      );
-      dataDir = wslHomeOut.trim() || "/tmp/clawhandoff";
-    }
-    const targetArgs = [...(chosenAgent.targetConfig?.args ?? [])];
-    if (chosenAgent.openclawAgentId) {
-      const shortRunSuffix = String(Date.now()).slice(-6);
-      targetArgs.push(
-        "--session",
-        `agent:${chosenAgent.openclawAgentId}:radar-issue-${opts.issue}-${shortRunSuffix}`,
-      );
-    }
-    bridgeConfig = {
-      dataDir,
-      defaultPublisherOwner: "remote_gated",
-      targets: {
-        [targetId]: {
-          ...chosenAgent.targetConfig,
-          targetId,
-          args: targetArgs,
-          ...(runtimeCwd ? { cwd: runtimeCwd } : {}),
+    let bridgeConfig;
+    let targetId;
+    if (chosenAgent.fromBridgeConfigPath) {
+      const rawBridge = await readJsonOrDefault(chosenAgent.fromBridgeConfigPath, {});
+      targetId = chosenAgent.bridgeTargetKey;
+      bridgeConfig = {
+        dataDir: rawBridge.dataDir || path.join(os.homedir(), ".clawhandoff"),
+        defaultPublisherOwner: "remote_gated",
+        targets: {
+          [targetId]: rawBridge.targets[targetId],
         },
-      },
-    };
-  }
-
-  const workerClawEntry =
-    chosenAgent.runtime === "wsl"
-      ? await toWslPath(clawhandoffEntry)
-      : clawhandoffEntry;
-  const workerStatusFile =
-    chosenAgent.runtime === "wsl" ? await toWslPath(statusFile) : statusFile;
-  const workerIndexFile =
-    chosenAgent.runtime === "wsl" ? await toWslPath(indexFile) : indexFile;
-
-  await fs.unlink(statusFile).catch(() => {});
-  await writeJsonAtomic(jobFile, {
-    clawhandoffEntry: workerClawEntry,
-    bridgeConfig,
-    targetId,
-    targetLabel: chosenAgent.label,
-    issueNumber: opts.issue,
-    repo,
-    envelope,
-    // Worktree is already created on native NTFS; pass displayWorktreePath without re-running git worktree add inside WSL
-    worktreeName: undefined,
-    displayWorktreePath: winWorktreePath || effectiveWinCwd || null,
-    statusFile: workerStatusFile,
-    indexFile: workerIndexFile,
-  });
-
-  if (chosenAgent.runtime === "wsl") {
-    const wslWorker = await toWslPath(WORKER_SCRIPT);
-    const wslJob = await toWslPath(jobFile);
-    const wslLog = await toWslPath(workerLogFile);
-    const unitName = `clawhandoff-issue-${opts.issue}-${Date.now()}`;
-    const innerCmd = [
-      'export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH";',
-      'for d in "$HOME"/.ocm/envs/daily/.openclaw "$HOME"/.ocm/envs/*/.openclaw "$HOME"/.openclaw; do',
-      '  if [ -d "$d" ] && [ -f "$d/openclaw.json" ]; then export OPENCLAW_STATE_DIR="$d"; break; fi;',
-      "done;",
-      `exec node "${wslWorker}" --job-file "${wslJob}" >>"${wslLog}" 2>&1`,
-    ].join(" ");
-    // Launch via systemd-run --user so the worker lives under Linux systemd --user (immune to wsl.exe exit & Windows Job Objects),
-    // falling back to detached wsl.exe only if systemd --user is unavailable.
-    await execFileAsync(
-      "wsl.exe",
-      [
-        "-e",
-        "bash",
-        "-lc",
-        `systemd-run --user --collect --unit="${unitName}" bash -lc '${innerCmd.replace(/'/g, "'\\''")}'`,
-      ],
-      { timeout: 10_000, windowsHide: true },
-    ).catch(() => {
-      const child = spawn("wsl.exe", ["-e", "bash", "-lc", innerCmd], {
-        detached: true,
-        stdio: "ignore",
-        windowsHide: true,
-      });
-      child.unref();
-    });
-  } else {
-    // Break away from PowerShell Start-Job Windows Job Object via Win32_Process.Create on Windows
-    if (process.platform === "win32") {
-      const cmdLine = `"${process.execPath}" "${WORKER_SCRIPT}" --job-file "${jobFile}"`;
-      await execFileAsync(
-        "pwsh",
-        [
-          "-NoProfile",
-          "-Command",
-          `$si = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16]0 }; Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = '${cmdLine.replace(/'/g, "''")}'; ProcessStartupInformation = $si } | Out-Null`,
-        ],
-        { timeout: 10_000, windowsHide: true },
-      ).catch(async () => {
-        const logFd = await fs.open(workerLogFile, "a");
-        const child = spawn(process.execPath, [WORKER_SCRIPT, "--job-file", jobFile], {
-          detached: true,
-          stdio: ["ignore", logFd.fd, logFd.fd],
-          windowsHide: true,
-        });
-        child.unref();
-        await logFd.close().catch(() => {});
-      });
+      };
     } else {
-      const logFd = await fs.open(workerLogFile, "a");
-      const child = spawn(process.execPath, [WORKER_SCRIPT, "--job-file", jobFile], {
-        detached: true,
-        stdio: ["ignore", logFd.fd, logFd.fd],
-        windowsHide: true,
-      });
-      child.unref();
-      await logFd.close().catch(() => {});
-    }
-  }
-
-  let latestStatus = null;
-  const waitDeadline = Date.now() + 35_000;
-  while (Date.now() < waitDeadline) {
-    await delay(500);
-    latestStatus = await readJsonOrDefault(statusFile, null);
-    if (!latestStatus) continue;
-    if (latestStatus.phase === "failed") {
-      return {
-        ok: false,
-        code: latestStatus.errorCode || "HANDOFF_START_FAILED",
-        commentPosted,
-        commentUrl,
-        message: `Temsilci oturumu hata verdi (${chosenAgent.label}): ${latestStatus.errorMessage || "detay için worker loguna bakın"}`,
+      targetId = chosenAgent.targetConfig?.targetId || chosenAgent.id;
+      let dataDir = path.join(os.homedir(), ".clawhandoff");
+      if (chosenAgent.runtime === "wsl") {
+        const { stdout: wslHomeOut } = await execFileAsync(
+          "wsl.exe",
+          ["-e", "bash", "-lc", 'printf "%s" "$HOME/.clawhandoff"'],
+          { timeout: 5_000, windowsHide: true },
+        );
+        dataDir = wslHomeOut.trim() || "/tmp/clawhandoff";
+      }
+      const targetArgs = [...(chosenAgent.targetConfig?.args ?? [])];
+      if (chosenAgent.openclawAgentId) {
+        const shortRunSuffix = String(Date.now()).slice(-6);
+        targetArgs.push(
+          "--session",
+          `agent:${chosenAgent.openclawAgentId}:radar-issue-${opts.issue}-${shortRunSuffix}`,
+        );
+      }
+      bridgeConfig = {
+        dataDir,
+        defaultPublisherOwner: "remote_gated",
+        targets: {
+          [targetId]: {
+            ...chosenAgent.targetConfig,
+            targetId,
+            args: targetArgs,
+            ...(runtimeCwd ? { cwd: runtimeCwd } : {}),
+          },
+        },
       };
     }
-    if (
-      latestStatus.handoffId &&
-      (latestStatus.phase === "running" || latestStatus.phase === "settled")
-    ) {
-      break;
+
+    const workerClawEntry =
+      chosenAgent.runtime === "wsl"
+        ? await toWslPath(clawhandoffEntry)
+        : clawhandoffEntry;
+    const workerStatusFile =
+      chosenAgent.runtime === "wsl" ? await toWslPath(statusFile) : statusFile;
+    const workerIndexFile =
+      chosenAgent.runtime === "wsl" ? await toWslPath(indexFile) : indexFile;
+
+    await fs.unlink(statusFile).catch(() => {});
+    await writeJsonAtomic(jobFile, {
+      clawhandoffEntry: workerClawEntry,
+      bridgeConfig,
+      targetId,
+      targetLabel: chosenAgent.label,
+      issueNumber: opts.issue,
+      repo,
+      envelope,
+      // Worktree is already created on native NTFS; pass displayWorktreePath without re-running git worktree add inside WSL
+      worktreeName: undefined,
+      displayWorktreePath: winWorktreePath || effectiveWinCwd || null,
+      statusFile: workerStatusFile,
+      indexFile: workerIndexFile,
+    });
+
+    await spawnWorkerProcess({
+      runtime: chosenAgent.runtime,
+      jobFile,
+      workerLogFile,
+      issueNumber: opts.issue,
+    });
+
+    let latestStatus = null;
+    const waitDeadline = Date.now() + 35_000;
+    while (Date.now() < waitDeadline) {
+      await delay(500);
+      latestStatus = await readJsonOrDefault(statusFile, null);
+      if (!latestStatus) continue;
+      if (latestStatus.phase === "failed") {
+        return {
+          ok: false,
+          code: latestStatus.errorCode || "HANDOFF_START_FAILED",
+          commentPosted,
+          commentUrl,
+          message: `Temsilci oturumu hata verdi (${chosenAgent.label}): ${latestStatus.errorMessage || "detay için worker loguna bakın"}`,
+        };
+      }
+      if (
+        latestStatus.handoffId &&
+        (latestStatus.phase === "running" || latestStatus.phase === "settled")
+      ) {
+        break;
+      }
     }
-  }
 
-  // Enroll in watch-state.json regardless if comment was posted or session started
-  const watchEngine = resolveWatchEngineScript();
-  await execFileAsync(
-    process.execPath,
-    [
-      watchEngine,
-      "--mode",
-      "mark-claimed",
-      "--mark-claimed",
-      String(opts.issue),
-      "--handoff-id",
-      latestStatus?.handoffId ?? "pending",
-      "--worktree-path",
-      winWorktreePath ?? "",
-    ],
-    {
-      cwd: HUD_ROOT,
-      env: { ...process.env, OPENCLAW_RADAR_WORKSPACE: HUD_ROOT },
-      timeout: 10_000,
-      windowsHide: true,
-    },
-  ).catch(() => {});
+    // Enroll in watch-state.json regardless if comment was posted or session started
+    const watchEngine = resolveWatchEngineScript();
+    await execFileAsync(
+      process.execPath,
+      [
+        watchEngine,
+        "--mode",
+        "mark-claimed",
+        "--mark-claimed",
+        String(opts.issue),
+        "--handoff-id",
+        latestStatus?.handoffId ?? "pending",
+        "--worktree-path",
+        winWorktreePath ?? "",
+      ],
+      {
+        cwd: HUD_ROOT,
+        env: { ...process.env, OPENCLAW_RADAR_WORKSPACE: HUD_ROOT },
+        timeout: 10_000,
+        windowsHide: true,
+      },
+    ).catch(() => {});
 
-  if (!latestStatus || !latestStatus.handoffId) {
-    let logTail = "";
-    try {
-      logTail = (await fs.readFile(workerLogFile, "utf8")).trim().slice(-240);
-    } catch {}
+    if (!latestStatus || !latestStatus.handoffId) {
+      let logTail = "";
+      try {
+        logTail = (await fs.readFile(workerLogFile, "utf8")).trim().slice(-240);
+      } catch {}
+      return {
+        ok: false,
+        code: "HANDOFF_TIMEOUT",
+        commentPosted,
+        commentUrl,
+        message: `clawhandoff oturumu 35 sn içinde yanıt vermedi (${chosenAgent.label}).${logTail ? ` Log: ${logTail}` : ""}`,
+      };
+    }
+
     return {
-      ok: false,
-      code: "HANDOFF_TIMEOUT",
+      ok: true,
+      issueNumber: opts.issue,
+      repo,
+      agentLabel: chosenAgent.label,
+      handoffId: latestStatus.handoffId,
+      worktreePath: winWorktreePath || latestStatus.worktreePath,
+      envelopePath: path.relative(HUD_ROOT, envelopePath),
+      markdownPath: path.relative(HUD_ROOT, markdownPath),
       commentPosted,
+      alreadyClaimedByViewer: raceCheck.alreadyClaimedByViewer,
       commentUrl,
-      message: `clawhandoff oturumu 35 sn içinde yanıt vermedi (${chosenAgent.label}).${logTail ? ` Log: ${logTail}` : ""}`,
     };
+  } finally {
+    await lock?.release();
   }
-
-  return {
-    ok: true,
-    issueNumber: opts.issue,
-    repo,
-    agentLabel: chosenAgent.label,
-    handoffId: latestStatus.handoffId,
-    worktreePath: winWorktreePath || latestStatus.worktreePath,
-    envelopePath: path.relative(HUD_ROOT, envelopePath),
-    markdownPath: path.relative(HUD_ROOT, markdownPath),
-    commentPosted,
-    alreadyClaimedByViewer: raceCheck.alreadyClaimedByViewer,
-    commentUrl,
-  };
 }
 
 async function main() {
