@@ -59,17 +59,23 @@ async function writeStatusAtomic(filePath, payload) {
 function parseWorkerArgs(argv) {
   let jobPath = "";
   let attachHandoffId = "";
+  let continueHandoffId = "";
+  let continueMessageFile = "";
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === "--job-file" && argv[i + 1]) {
       jobPath = path.resolve(argv[++i]);
     } else if (argv[i] === "--attach-handoff-id" && argv[i + 1]) {
       attachHandoffId = argv[++i].trim();
+    } else if (argv[i] === "--continue-handoff-id" && argv[i + 1]) {
+      continueHandoffId = argv[++i].trim();
+    } else if (argv[i] === "--continue-message-file" && argv[i + 1]) {
+      continueMessageFile = path.resolve(argv[++i]);
     }
   }
   if (!jobPath) {
     throw new Error("Missing --job-file <path>");
   }
-  return { jobPath, attachHandoffId };
+  return { jobPath, attachHandoffId, continueHandoffId, continueMessageFile };
 }
 
 async function updateActiveIndex(indexFile, entry) {
@@ -90,7 +96,12 @@ async function updateActiveIndex(indexFile, entry) {
 }
 
 async function main() {
-  const { jobPath, attachHandoffId: cliAttachId } = parseWorkerArgs(process.argv.slice(2));
+  const {
+    jobPath,
+    attachHandoffId: cliAttachId,
+    continueHandoffId: cliContinueId,
+    continueMessageFile,
+  } = parseWorkerArgs(process.argv.slice(2));
   const job = JSON.parse(await fs.readFile(jobPath, "utf8"));
   const {
     clawhandoffEntry,
@@ -106,12 +117,29 @@ async function main() {
     indexFile,
   } = job;
   const resumeHandoffId = cliAttachId || job.attachHandoffId || "";
+  const contHandoffId = cliContinueId || job.continueHandoffId || "";
+  const contMessage = continueMessageFile
+    ? (await fs.readFile(continueMessageFile, "utf8")).trim()
+    : "";
 
   let startedAt = new Date().toISOString();
-  if (resumeHandoffId) {
+  if (resumeHandoffId || contHandoffId) {
     try {
       const prev = JSON.parse(await fs.readFile(statusFile, "utf8"));
       if (prev?.startedAt) startedAt = prev.startedAt;
+      if (contHandoffId && contMessage) {
+        const runningRec = {
+          ...prev,
+          ok: true,
+          phase: "running",
+          lifecycleStatus: "running",
+          directiveAction: "POLL_ATTACH",
+          directiveReason: "Yeni talimat gönderiliyor...",
+          updatedAt: new Date().toISOString(),
+        };
+        await writeStatusAtomic(statusFile, runningRec);
+        await updateActiveIndex(indexFile, runningRec);
+      }
     } catch {}
   } else {
     await writeStatusAtomic(statusFile, {
@@ -133,18 +161,26 @@ async function main() {
   const bridge = new BridgeService(bridgeConfig);
 
   try {
-    let result = resumeHandoffId
-      ? await bridge.attachHandoff({
-          handoffId: resumeHandoffId,
-          waitBudgetMs: 25_000,
-        })
-      : await bridge.startHandoff({
-          targetId,
-          envelope,
-          worktreeName: worktreeName || undefined,
-          waitBudgetMs: 1_000,
-          maxAutonomousTurns: 8,
-        });
+    let result =
+      contHandoffId && contMessage
+        ? await bridge.continueHandoff({
+            handoffId: contHandoffId,
+            intent: "counter_evidence_or_followup",
+            message: contMessage,
+            waitBudgetMs: 1_000,
+          })
+        : resumeHandoffId
+          ? await bridge.attachHandoff({
+              handoffId: resumeHandoffId,
+              waitBudgetMs: 25_000,
+            })
+          : await bridge.startHandoff({
+              targetId,
+              envelope,
+              worktreeName: worktreeName || undefined,
+              waitBudgetMs: 1_000,
+              maxAutonomousTurns: 8,
+            });
 
     const resolvedWtPath =
       displayWorktreePath ||

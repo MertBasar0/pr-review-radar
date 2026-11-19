@@ -11,6 +11,7 @@
   [string]$PreviewFilter = "",
   [switch]$PreviewExpandBrief,
   [int]$PreviewHandoffIssue = 0,
+  [int]$PreviewStage2Issue = 0,
   [switch]$AutoCloseAfterPreview
 )
 
@@ -399,6 +400,26 @@ $Strings = @{
     HandoffLaunchingBtn  = "Launching..."
     HandoffCancelBtn     = "Cancel"
     HandoffLaunchedMsg   = "✓ #{0} launched on {1} ({2})"
+    BtnStage2Publish     = "🚀 Verify & Open PR"
+    BtnContinueSess      = "💬 Continue"
+    BtnAbortSess         = "⏹ Stop"
+    BtnOpenPr            = "🔗 PR #{0}"
+    PhaseRunning         = "⏳ RUNNING"
+    PhaseSettled         = "✓ STAGE 1 READY"
+    PhasePublished       = "🎉 PR #{0} OPENED"
+    PhaseFailed          = "⚠ FAILED"
+    PhaseStopped         = "⏹ STOPPED"
+    Stage2PubHeader      = "🚀 #{0} — Rebase, Verify & Open PR ({1})"
+    Stage2ContHeader     = "💬 #{0} — Send Instruction to Session"
+    Stage2TranscriptChk  = "Include redacted Agent Transcript in PR"
+    Stage2PreviewBtn     = "Preview"
+    Stage2NoteTip        = "Optional live-verification evidence or PR note..."
+    Stage2PromptTip      = "Write follow-up instruction for this session..."
+    Stage2ConfirmPubBtn  = "✓ Rebase & Open PR"
+    Stage2ConfirmContBtn = "✓ Send Instruction"
+    Stage2RunningBtn     = "Working..."
+    Stage2PublishedMsg   = "🎉 #{0} -> PR #{1} opened & tracked!"
+    Stage2ContinuedMsg   = "💬 Sent follow-up instruction to #{0}"
     CardTipStatus        = "Status"
     CardTipNext          = "Next"
     CardTipClicks        = "(Left-click: Open in browser  |  Right-click: Copy link)"
@@ -508,6 +529,26 @@ $Strings = @{
     HandoffLaunchingBtn  = "Başlatılıyor..."
     HandoffCancelBtn     = "Vazgeç"
     HandoffLaunchedMsg   = "✓ #{0} için {1} oturumu başlatıldı ({2})"
+    BtnStage2Publish     = "🚀 Doğrula & PR Aç"
+    BtnContinueSess      = "💬 Devam"
+    BtnAbortSess         = "⏹ Durdur"
+    BtnOpenPr            = "🔗 PR #{0}"
+    PhaseRunning         = "⏳ ÇALIŞIYOR"
+    PhaseSettled         = "✓ STAGE 1 HAZIR"
+    PhasePublished       = "🎉 PR #{0} AÇILDI"
+    PhaseFailed          = "⚠ HATA"
+    PhaseStopped         = "⏹ DURDURULDU"
+    Stage2PubHeader      = "🚀 #{0} — Rebase, Doğrula & PR Aç ({1})"
+    Stage2ContHeader     = "💬 #{0} — Mevcut Oturuma Talimat Gönder"
+    Stage2TranscriptChk  = "Arındırılmış oturum kaydı (Agent Transcript) ekle"
+    Stage2PreviewBtn     = "Önizle"
+    Stage2NoteTip        = "Ek canlı doğrulama kanıtı veya PR notu (isteğe bağlı)..."
+    Stage2PromptTip      = "Oturuma gönderilecek devam talimatını yazın..."
+    Stage2ConfirmPubBtn  = "✓ Rebase + PR Aç"
+    Stage2ConfirmContBtn = "✓ Talimatı Gönder"
+    Stage2RunningBtn     = "Çalışıyor..."
+    Stage2PublishedMsg   = "🎉 #{0} -> PR #{1} açıldı ve takibe alındı!"
+    Stage2ContinuedMsg   = "💬 #{0} oturumuna yeni talimat iletildi"
     CardTipStatus        = "Durum"
     CardTipNext          = "Öneri"
     CardTipClicks        = "(Sol tık: Tarayıcıda aç  |  Sağ tık: Bağlantıyı kopyala)"
@@ -633,6 +674,11 @@ function Reload-LocalAuxState {
   $script:DetectedAgents = Read-JsonFileSafe $DetectedAgentsPath
   $script:ActiveSessions = Read-JsonFileSafe $ActiveSessionsPath
   $script:ConfigObj = Read-JsonFileSafe $ConfigPath
+  if (Test-Path -LiteralPath $ActiveSessionsPath) {
+    try {
+      $script:LastActiveSessionsMtime = (Get-Item -LiteralPath $ActiveSessionsPath).LastWriteTimeUtc
+    } catch {}
+  }
 }
 
 function Invoke-CommitCursor {
@@ -868,29 +914,54 @@ function New-BadgePill([string]$Text, [string]$BgHex, [string]$BorderHex, [strin
           </Border>
         </Grid>
 
-        <!-- Inline Preview & Confirmation Box for Candidate Ownership + clawhandoff Launch -->
-        <Border x:Name="HandoffConfirmBorder" Grid.Row="4" CornerRadius="8" BorderThickness="1.4" Padding="9,7" Margin="10,0,10,5" Visibility="Collapsed">
-          <StackPanel>
-            <TextBlock x:Name="HandoffHeaderTb" FontSize="11.5" FontWeight="Bold" TextTrimming="CharacterEllipsis" Margin="0,0,0,5"/>
-            <Grid Margin="0,0,0,5">
-              <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="Auto"/>
-                <ColumnDefinition Width="*"/>
-              </Grid.ColumnDefinitions>
-              <TextBlock x:Name="HandoffAgentLbl" Grid.Column="0" FontSize="10.5" VerticalAlignment="Center" Margin="0,0,6,0"/>
-              <Button x:Name="BtnHandoffTarget" Grid.Column="1" Padding="7,3.5" FontSize="10.5" FontWeight="SemiBold" Cursor="Hand" BorderThickness="1" HorizontalContentAlignment="Left"/>
-            </Grid>
-            <CheckBox x:Name="ChkSendClaim" IsChecked="True" FontSize="10.5" Margin="0,0,0,4"/>
-            <Border x:Name="ClaimCommentBorder" CornerRadius="5" BorderThickness="1" Padding="6,4" Margin="0,0,0,5">
-              <TextBox x:Name="TxtClaimComment" Background="Transparent" BorderThickness="0" FontSize="11" AcceptsReturn="True" TextWrapping="Wrap" MaxHeight="48"/>
-            </Border>
-            <TextBlock x:Name="HandoffStatusTb" FontSize="10" TextWrapping="Wrap" Margin="0,0,0,5" Visibility="Collapsed"/>
-            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-              <Button x:Name="BtnCancelHandoff" Padding="9,3.5" Margin="0,0,5,0" FontSize="10.5" FontWeight="SemiBold" Cursor="Hand" BorderThickness="1"/>
-              <Button x:Name="BtnConfirmHandoff" Padding="10,3.5" FontSize="10.5" FontWeight="Bold" Cursor="Hand" BorderThickness="1"/>
+        <!-- Inline Preview & Confirmation Boxes (Stage 1 Claim & Stage 2 Publish/Continue) -->
+        <StackPanel Grid.Row="4">
+          <Border x:Name="HandoffConfirmBorder" CornerRadius="8" BorderThickness="1.4" Padding="9,7" Margin="10,0,10,5" Visibility="Collapsed">
+            <StackPanel>
+              <TextBlock x:Name="HandoffHeaderTb" FontSize="11.5" FontWeight="Bold" TextTrimming="CharacterEllipsis" Margin="0,0,0,5"/>
+              <Grid Margin="0,0,0,5">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="Auto"/>
+                  <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock x:Name="HandoffAgentLbl" Grid.Column="0" FontSize="10.5" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <Button x:Name="BtnHandoffTarget" Grid.Column="1" Padding="7,3.5" FontSize="10.5" FontWeight="SemiBold" Cursor="Hand" BorderThickness="1" HorizontalContentAlignment="Left"/>
+              </Grid>
+              <CheckBox x:Name="ChkSendClaim" IsChecked="True" FontSize="10.5" Margin="0,0,0,4"/>
+              <Border x:Name="ClaimCommentBorder" CornerRadius="5" BorderThickness="1" Padding="6,4" Margin="0,0,0,5">
+                <TextBox x:Name="TxtClaimComment" Background="Transparent" BorderThickness="0" FontSize="11" AcceptsReturn="True" TextWrapping="Wrap" MaxHeight="48"/>
+              </Border>
+              <TextBlock x:Name="HandoffStatusTb" FontSize="10" TextWrapping="Wrap" Margin="0,0,0,5" Visibility="Collapsed"/>
+              <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button x:Name="BtnCancelHandoff" Padding="9,3.5" Margin="0,0,5,0" FontSize="10.5" FontWeight="SemiBold" Cursor="Hand" BorderThickness="1"/>
+                <Button x:Name="BtnConfirmHandoff" Padding="10,3.5" FontSize="10.5" FontWeight="Bold" Cursor="Hand" BorderThickness="1"/>
+              </StackPanel>
             </StackPanel>
-          </StackPanel>
-        </Border>
+          </Border>
+
+          <Border x:Name="Stage2ConfirmBorder" CornerRadius="8" BorderThickness="1.4" Padding="9,7" Margin="10,0,10,5" Visibility="Collapsed">
+            <StackPanel>
+              <TextBlock x:Name="Stage2HeaderTb" FontSize="11.5" FontWeight="Bold" TextTrimming="CharacterEllipsis" Margin="0,0,0,3"/>
+              <TextBlock x:Name="Stage2StatTb" FontSize="9.5" TextWrapping="Wrap" Margin="0,0,0,5" Visibility="Collapsed"/>
+              <Grid x:Name="Stage2TranscriptGrid" Margin="0,0,0,4">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*"/>
+                  <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <CheckBox x:Name="ChkIncludeTranscript" Grid.Column="0" IsChecked="False" FontSize="10" VerticalAlignment="Center"/>
+                <Button x:Name="BtnPreviewTranscript" Grid.Column="1" Padding="6,2" Margin="6,0,0,0" FontSize="9.5" FontWeight="SemiBold" Cursor="Hand" BorderThickness="1"/>
+              </Grid>
+              <Border x:Name="Stage2InputBorder" CornerRadius="5" BorderThickness="1" Padding="6,4" Margin="0,0,0,5">
+                <TextBox x:Name="TxtStage2Input" Background="Transparent" BorderThickness="0" FontSize="10.5" AcceptsReturn="True" TextWrapping="Wrap" MaxHeight="56"/>
+              </Border>
+              <TextBlock x:Name="Stage2StatusTb" FontSize="10" TextWrapping="Wrap" Margin="0,0,0,5" Visibility="Collapsed"/>
+              <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button x:Name="BtnCancelStage2" Padding="9,3.5" Margin="0,0,5,0" FontSize="10.5" FontWeight="SemiBold" Cursor="Hand" BorderThickness="1"/>
+                <Button x:Name="BtnConfirmStage2" Padding="10,3.5" FontSize="10.5" FontWeight="Bold" Cursor="Hand" BorderThickness="1"/>
+              </StackPanel>
+            </StackPanel>
+          </Border>
+        </StackPanel>
 
         <!-- PR & Candidate Cards Scroll List -->
         <ScrollViewer x:Name="CardsScroll" Grid.Row="5" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="10,1,10,6">
@@ -970,6 +1041,17 @@ $TxtClaimComment      = $Window.FindName("TxtClaimComment")
 $HandoffStatusTb      = $Window.FindName("HandoffStatusTb")
 $BtnCancelHandoff     = $Window.FindName("BtnCancelHandoff")
 $BtnConfirmHandoff    = $Window.FindName("BtnConfirmHandoff")
+$Stage2ConfirmBorder  = $Window.FindName("Stage2ConfirmBorder")
+$Stage2HeaderTb       = $Window.FindName("Stage2HeaderTb")
+$Stage2StatTb         = $Window.FindName("Stage2StatTb")
+$Stage2TranscriptGrid = $Window.FindName("Stage2TranscriptGrid")
+$ChkIncludeTranscript = $Window.FindName("ChkIncludeTranscript")
+$BtnPreviewTranscript = $Window.FindName("BtnPreviewTranscript")
+$Stage2InputBorder    = $Window.FindName("Stage2InputBorder")
+$TxtStage2Input       = $Window.FindName("TxtStage2Input")
+$Stage2StatusTb       = $Window.FindName("Stage2StatusTb")
+$BtnCancelStage2      = $Window.FindName("BtnCancelStage2")
+$BtnConfirmStage2     = $Window.FindName("BtnConfirmStage2")
 $CardsStack           = $Window.FindName("CardsStack")
 $FooterBar            = $Window.FindName("FooterBar")
 $BtnMarkSeen          = $Window.FindName("BtnMarkSeen")
@@ -986,6 +1068,11 @@ $script:ActiveFilter = if ($PreviewFilter) { $PreviewFilter } else { "ALL" }
 $script:BriefExpanded = [bool]$PreviewExpandBrief
 $script:PendingHandoffCandidate = $null
 $script:SelectedHandoffAgentId = ""
+$script:PendingStage2Session = $null
+$script:Stage2Mode = "publish"
+$script:Stage2InspectInfo = $null
+$script:Stage2InlineError = ""
+$script:Stage2ProgressText = ""
 $script:CachedData = $null
 $script:WatchReport = $null
 $script:WatchState = $null
@@ -996,9 +1083,13 @@ $script:ConfigObj = $null
 $script:SweepJob = $null
 $script:FocusJob = $null
 $script:HandoffJob = $null
+$script:Stage2Job = $null
 $script:IsRefreshing = $false
 $script:IsFocusing = $false
 $script:IsLaunchingHandoff = $false
+$script:IsRunningStage2 = $false
+$script:LastActiveSessionsMtime = [datetime]::MinValue
+$script:LastSessionFileCheckUtc = [datetime]::MinValue
 $script:AllowExit = $false
 $script:TrayIcon = $null
 $script:CurrentTrayHIcon = [IntPtr]::Zero
@@ -1072,6 +1163,7 @@ function Get-SelectedHandoffAgentObject {
 function Open-HandoffConfirmDialog($Candidate) {
   Reload-LocalAuxState
   $L = Get-LangTable
+  $script:PendingStage2Session = $null
   $script:PendingHandoffCandidate = $Candidate
   $script:HandoffInlineError = ""
   $script:HandoffProgressText = ""
@@ -1085,6 +1177,59 @@ function Open-HandoffConfirmDialog($Candidate) {
   $agentObj = Get-SelectedHandoffAgentObject
   $BtnHandoffTarget.Content = if ($agentObj) { "🤖 $($agentObj.label) ▾" } else { "🤖 auto ▾" }
   $HandoffConfirmBorder.Visibility = [System.Windows.Visibility]::Visible
+}
+
+function Open-Stage2Dialog($Sess, [string]$Mode = "publish") {
+  Reload-LocalAuxState
+  $L = Get-LangTable
+  $script:PendingHandoffCandidate = $null
+  $script:PendingStage2Session = $Sess
+  $script:Stage2Mode = $Mode
+  $script:Stage2InlineError = ""
+  $script:Stage2ProgressText = ""
+  $script:Stage2InspectInfo = $null
+
+  $shortSha = if ($Sess.headSha) { ([string]$Sess.headSha).Substring(0, [math]::Min(10, ([string]$Sess.headSha).Length)) } else { "HEAD" }
+  $statLine = ""
+  if (Test-Path -LiteralPath $HandoffScript) {
+    try {
+      $env:OPENCLAW_RADAR_WORKSPACE = $HudRoot
+      $rawIns = (& node $HandoffScript --mode inspect-candidate --issue "$($Sess.issueNumber)" 2>$null) -join "`n"
+      if ($rawIns -and $rawIns.IndexOf("{") -ge 0) {
+        $ins = $rawIns.Substring($rawIns.IndexOf("{")) | ConvertFrom-Json
+        if ($ins -and $ins.ok) {
+          $script:Stage2InspectInfo = $ins
+          if ($ins.shortSha) { $shortSha = [string]$ins.shortSha }
+          $ns = $ins.numstat
+          $prodNet = ([int]$ns.prodAdded) - ([int]$ns.prodDeleted)
+          $prodSign = if ($prodNet -gt 0) { "+$prodNet" } else { "$prodNet" }
+          $fileCount = if ($ns.files) { @($ns.files).Count } else { 0 }
+          $headlinePart = if ($ins.commitHeadline) { "`n📝 $($ins.commitHeadline)" } else { "" }
+          $statLine = "📦 $shortSha · prod +$($ns.prodAdded)/-$($ns.prodDeleted) (net $prodSign) · test +$($ns.testAdded)/-$($ns.testDeleted) · $fileCount file(s)$headlinePart"
+        }
+      }
+    } catch {}
+  }
+
+  if ($statLine) {
+    $Stage2StatTb.Text = $statLine
+    $Stage2StatTb.Visibility = [System.Windows.Visibility]::Visible
+  } else {
+    $Stage2StatTb.Visibility = [System.Windows.Visibility]::Collapsed
+  }
+
+  $TxtStage2Input.Text = ""
+  if ($Mode -eq "publish") {
+    $Stage2HeaderTb.Text = ($L.Stage2PubHeader -f $Sess.issueNumber, $shortSha)
+    $Stage2TranscriptGrid.Visibility = [System.Windows.Visibility]::Visible
+    $ChkIncludeTranscript.IsChecked = $false
+    $TxtStage2Input.ToolTip = $L.Stage2NoteTip
+  } else {
+    $Stage2HeaderTb.Text = ($L.Stage2ContHeader -f $Sess.issueNumber)
+    $Stage2TranscriptGrid.Visibility = [System.Windows.Visibility]::Collapsed
+    $TxtStage2Input.ToolTip = $L.Stage2PromptTip
+  }
+  $Stage2ConfirmBorder.Visibility = [System.Windows.Visibility]::Visible
 }
 
 function Update-FocusPlaceholderVisibility {
@@ -1602,49 +1747,178 @@ function Add-WatchDeltaCard($Ev, $Pal) {
 
 function Add-ActiveSessionCard($Sess, $Pal) {
   $L = Get-LangTable
+  $phase = ([string]$Sess.phase).ToLowerInvariant()
+
+  $accentHex = $Pal.AccentWatch
+  $pillText = $phase.ToUpperInvariant()
+  $pillBg = $Pal.PrNumBg
+  $pillBd = $Pal.PrNumBorder
+  $pillFg = $Pal.PrNumFg
+
+  if ($phase -eq "settled") {
+    $accentHex = $Pal.AccentReady
+    $shortSha = if ($Sess.headSha) { " · " + ([string]$Sess.headSha).Substring(0, [math]::Min(8, ([string]$Sess.headSha).Length)) } else { "" }
+    $pillText = "$($L.PhaseSettled)$shortSha"
+    $pillBg = $Pal.BadgeReadyBg; $pillBd = $Pal.BadgeReadyBorder; $pillFg = $Pal.BadgeReadyFg
+  } elseif ($phase -eq "running") {
+    $accentHex = $Pal.AccentGold
+    $pillText = $L.PhaseRunning
+    $pillBg = $Pal.BadgeGoldBg; $pillBd = $Pal.BadgeGoldBorder; $pillFg = $Pal.BadgeGoldFg
+  } elseif ($phase -eq "published") {
+    $accentHex = $Pal.AccentReview
+    $prNumDisp = if ($Sess.prNumber) { $Sess.prNumber } else { "?" }
+    $pillText = ($L.PhasePublished -f $prNumDisp)
+    $pillBg = $Pal.BadgeReviewBg; $pillBd = $Pal.BadgeReviewBorder; $pillFg = $Pal.BadgeReviewFg
+  } elseif ($phase -eq "failed") {
+    $accentHex = $Pal.AccentFail
+    $pillText = $L.PhaseFailed
+    $pillBg = $Pal.BadgeFailBg; $pillBd = $Pal.BadgeFailBorder; $pillFg = $Pal.BadgeFailFg
+  } elseif ($phase -eq "stopped") {
+    $accentHex = $Pal.AccentWatch
+    $pillText = $L.PhaseStopped
+    $pillBg = $Pal.BadgeWatchBg; $pillBd = $Pal.BadgeWatchBorder; $pillFg = $Pal.BadgeWatchFg
+  }
+
   $card = [System.Windows.Controls.Border]::new()
-  $card.Background = ConvertFrom-BrushHex $Pal.DrawerBg
-  $card.BorderBrush = ConvertFrom-BrushHex $Pal.DrawerBorder
-  $card.BorderThickness = [System.Windows.Thickness]::new(1)
+  $card.Background = ConvertFrom-BrushHex $(if ($phase -eq "settled") { $Pal.RowBg } else { $Pal.DrawerBg })
+  $card.BorderBrush = ConvertFrom-BrushHex $(if ($phase -eq "settled") { $Pal.BadgeReadyBorder } else { $Pal.DrawerBorder })
+  $card.BorderThickness = [System.Windows.Thickness]::new($(if ($phase -eq "settled") { 1.3 } else { 1 }))
   $card.CornerRadius = [System.Windows.CornerRadius]::new(8)
   $card.Margin = [System.Windows.Thickness]::new(0, 0, 0, 5)
-  $card.Padding = [System.Windows.Thickness]::new(8, 5, 8, 5)
 
-  $grid = [System.Windows.Controls.Grid]::new()
-  $c0 = [System.Windows.Controls.ColumnDefinition]::new()
-  $c0.Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
-  $c1 = [System.Windows.Controls.ColumnDefinition]::new()
-  $c1.Width = [System.Windows.GridLength]::Auto
-  [void]$grid.ColumnDefinitions.Add($c0)
-  [void]$grid.ColumnDefinitions.Add($c1)
+  $rowGrid = [System.Windows.Controls.Grid]::new()
+  $colAccent = [System.Windows.Controls.ColumnDefinition]::new()
+  $colAccent.Width = [System.Windows.GridLength]::new(4.5)
+  $colBody = [System.Windows.Controls.ColumnDefinition]::new()
+  $colBody.Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
+  [void]$rowGrid.ColumnDefinitions.Add($colAccent)
+  [void]$rowGrid.ColumnDefinitions.Add($colBody)
 
-  $stStack = [System.Windows.Controls.StackPanel]::new()
-  $phaseText = ([string]$Sess.phase).ToUpperInvariant()
-  $topLine = [System.Windows.Controls.TextBlock]::new()
-  $topLine.Text = "#$($Sess.issueNumber) · $($Sess.targetLabel) · [$phaseText]"
-  $topLine.FontSize = 10.5
-  $topLine.FontWeight = [System.Windows.FontWeights]::Bold
-  $topLine.Foreground = ConvertFrom-BrushHex $Pal.TileP2Fg
-  $topLine.TextTrimming = [System.Windows.TextTrimming]::CharacterEllipsis
-  [void]$stStack.Children.Add($topLine)
+  $stripe = [System.Windows.Controls.Border]::new()
+  $stripe.Background = ConvertFrom-BrushHex $accentHex
+  $stripe.CornerRadius = [System.Windows.CornerRadius]::new(7, 0, 0, 7)
+  [System.Windows.Controls.Grid]::SetColumn($stripe, 0)
+  [void]$rowGrid.Children.Add($stripe)
 
-  if ($Sess.summary -or $Sess.directiveReason) {
-    $subLine = [System.Windows.Controls.TextBlock]::new()
-    $subLine.Text = if ($Sess.summary) { [string]$Sess.summary } else { [string]$Sess.directiveReason }
-    $subLine.FontSize = 9.5
-    $subLine.Foreground = ConvertFrom-BrushHex $Pal.SubFg
-    $subLine.TextTrimming = [System.Windows.TextTrimming]::CharacterEllipsis
-    [void]$stStack.Children.Add($subLine)
+  $bodyStack = [System.Windows.Controls.StackPanel]::new()
+  $bodyStack.Margin = [System.Windows.Thickness]::new(8, 5.5, 8, 5.5)
+  [System.Windows.Controls.Grid]::SetColumn($bodyStack, 1)
+
+  $topWrap = [System.Windows.Controls.WrapPanel]::new()
+  $topWrap.Orientation = [System.Windows.Controls.Orientation]::Horizontal
+  $topWrap.Margin = [System.Windows.Thickness]::new(0, 0, 0, 2)
+
+  $issNum = [int]$Sess.issueNumber
+  $repoSlug = if ($Sess.repo) { [string]$Sess.repo } else { "openclaw/openclaw" }
+  $issUrl = "https://github.com/$repoSlug/issues/$issNum"
+  $numPill = New-BadgePill "#$issNum" $Pal.PrNumBg $Pal.PrNumBorder $Pal.PrNumFg $true
+  $numPill.Cursor = [System.Windows.Input.Cursors]::Hand
+  $numPill.Add_MouseLeftButtonUp({ Start-Process $issUrl }.GetNewClosure())
+  [void]$topWrap.Children.Add($numPill)
+  [void]$topWrap.Children.Add((New-BadgePill $pillText $pillBg $pillBd $pillFg $true))
+
+  if ($Sess.targetLabel) {
+    $shortTarget = ([string]$Sess.targetLabel) -replace "\s*\(WSL\)\s*$", ""
+    [void]$topWrap.Children.Add((New-BadgePill $shortTarget $Pal.BadgeWatchBg $Pal.BadgeWatchBorder $Pal.BadgeWatchFg $false))
   }
-  [System.Windows.Controls.Grid]::SetColumn($stStack, 0)
-  [void]$grid.Children.Add($stStack)
+  [void]$bodyStack.Children.Add($topWrap)
+
+  $detailText = if ($Sess.summary) { [string]$Sess.summary } elseif ($Sess.directiveReason) { [string]$Sess.directiveReason } elseif ($Sess.errorMessage) { [string]$Sess.errorMessage } else { "" }
+  if ($detailText) {
+    $subLine = [System.Windows.Controls.TextBlock]::new()
+    $subLine.Text = $detailText
+    $subLine.FontSize = 10
+    $subLine.Foreground = ConvertFrom-BrushHex $Pal.SubFg
+    $subLine.TextWrapping = [System.Windows.TextWrapping]::Wrap
+    $subLine.MaxHeight = 30
+    $subLine.TextTrimming = [System.Windows.TextTrimming]::CharacterEllipsis
+    $subLine.ToolTip = $detailText
+    [void]$bodyStack.Children.Add($subLine)
+  }
+
+  $btnWrap = [System.Windows.Controls.WrapPanel]::new()
+  $btnWrap.Orientation = [System.Windows.Controls.Orientation]::Horizontal
+  $btnWrap.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Right
+  $btnWrap.Margin = [System.Windows.Thickness]::new(0, 4, 0, 0)
+
+  $sessRef = $Sess
+  if ($phase -eq "settled") {
+    $pubBtn = [System.Windows.Controls.Button]::new()
+    $pubBtn.Content = $L.BtnStage2Publish
+    $pubBtn.FontSize = 9.5
+    $pubBtn.FontWeight = [System.Windows.FontWeights]::Bold
+    $pubBtn.Padding = [System.Windows.Thickness]::new(7, 2.5, 7, 2.5)
+    $pubBtn.Margin = [System.Windows.Thickness]::new(0, 0, 4, 2)
+    $pubBtn.BorderThickness = [System.Windows.Thickness]::new(1)
+    $pubBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+    Set-StyledButton $pubBtn $Pal.PrimaryBtnBg $Pal.PrimaryBtnBorder $Pal.PrimaryBtnFg
+    $pubBtn.Add_Click({
+      Open-Stage2Dialog $sessRef "publish"
+      Update-HudView
+    }.GetNewClosure())
+    [void]$btnWrap.Children.Add($pubBtn)
+  }
+
+  if ($phase -eq "published" -and $Sess.prUrl) {
+    $prUrlStr = [string]$Sess.prUrl
+    $prBtn = [System.Windows.Controls.Button]::new()
+    $prBtn.Content = ($L.BtnOpenPr -f $Sess.prNumber)
+    $prBtn.FontSize = 9.5
+    $prBtn.FontWeight = [System.Windows.FontWeights]::Bold
+    $prBtn.Padding = [System.Windows.Thickness]::new(7, 2.5, 7, 2.5)
+    $prBtn.Margin = [System.Windows.Thickness]::new(0, 0, 4, 2)
+    $prBtn.BorderThickness = [System.Windows.Thickness]::new(1)
+    $prBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+    Set-StyledButton $prBtn $Pal.TileP2Bg $Pal.TileP2Border $Pal.TileP2Fg
+    $prBtn.Add_Click({
+      if ($prUrlStr -match "^https://github\.com/") { Start-Process $prUrlStr }
+    }.GetNewClosure())
+    [void]$btnWrap.Children.Add($prBtn)
+  }
+
+  if ($phase -in @("settled", "failed", "stopped")) {
+    $contBtn = [System.Windows.Controls.Button]::new()
+    $contBtn.Content = $L.BtnContinueSess
+    $contBtn.FontSize = 9.5
+    $contBtn.FontWeight = [System.Windows.FontWeights]::SemiBold
+    $contBtn.Padding = [System.Windows.Thickness]::new(6.5, 2.5, 6.5, 2.5)
+    $contBtn.Margin = [System.Windows.Thickness]::new(0, 0, 4, 2)
+    $contBtn.BorderThickness = [System.Windows.Thickness]::new(1)
+    $contBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+    Set-StyledButton $contBtn $Pal.ActionBtnBg $Pal.ActionBtnBorder $Pal.ActionBtnFg
+    $contBtn.Add_Click({
+      Open-Stage2Dialog $sessRef "continue"
+      Update-HudView
+    }.GetNewClosure())
+    [void]$btnWrap.Children.Add($contBtn)
+  }
+
+  if ($phase -eq "running") {
+    $stopBtn = [System.Windows.Controls.Button]::new()
+    $stopBtn.Content = $L.BtnAbortSess
+    $stopBtn.FontSize = 9.5
+    $stopBtn.FontWeight = [System.Windows.FontWeights]::SemiBold
+    $stopBtn.Padding = [System.Windows.Thickness]::new(6.5, 2.5, 6.5, 2.5)
+    $stopBtn.Margin = [System.Windows.Thickness]::new(0, 0, 4, 2)
+    $stopBtn.BorderThickness = [System.Windows.Thickness]::new(1)
+    $stopBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+    Set-StyledButton $stopBtn $Pal.BadgeFailBg $Pal.BadgeFailBorder $Pal.BadgeFailFg
+    $stopBtn.Add_Click({
+      $env:OPENCLAW_RADAR_WORKSPACE = $HudRoot
+      & node $HandoffScript --mode abort-session --issue "$issNum" 2>$null | Out-Null
+      Reload-LocalAuxState
+      Update-HudView
+    }.GetNewClosure())
+    [void]$btnWrap.Children.Add($stopBtn)
+  }
 
   if ($Sess.worktreePath) {
     $wtPath = [string]$Sess.worktreePath
     $wtBtn = [System.Windows.Controls.Button]::new()
     $wtBtn.Content = $L.BtnOpenWorktree
     $wtBtn.FontSize = 9.5
-    $wtBtn.Padding = [System.Windows.Thickness]::new(6, 2, 6, 2)
+    $wtBtn.Padding = [System.Windows.Thickness]::new(6, 2.5, 6, 2.5)
+    $wtBtn.Margin = [System.Windows.Thickness]::new(0, 0, 4, 2)
     $wtBtn.BorderThickness = [System.Windows.Thickness]::new(1)
     $wtBtn.Cursor = [System.Windows.Input.Cursors]::Hand
     Set-StyledButton $wtBtn $Pal.ActionBtnBg $Pal.ActionBtnBorder $Pal.ActionBtnFg
@@ -1655,11 +1929,33 @@ function Add-ActiveSessionCard($Sess, $Pal) {
         Start-Process "explorer.exe" -ArgumentList $wtPath
       }
     }.GetNewClosure())
-    [System.Windows.Controls.Grid]::SetColumn($wtBtn, 1)
-    [void]$grid.Children.Add($wtBtn)
+    [void]$btnWrap.Children.Add($wtBtn)
   }
 
-  $card.Child = $grid
+  if ($phase -ne "running") {
+    $disBtn = [System.Windows.Controls.Button]::new()
+    $disBtn.Content = $L.BtnDismissCand
+    $disBtn.FontSize = 9.5
+    $disBtn.Padding = [System.Windows.Thickness]::new(5.5, 2.5, 5.5, 2.5)
+    $disBtn.Margin = [System.Windows.Thickness]::new(0, 0, 0, 2)
+    $disBtn.BorderThickness = [System.Windows.Thickness]::new(1)
+    $disBtn.Cursor = [System.Windows.Input.Cursors]::Hand
+    Set-StyledButton $disBtn $Pal.ActionBtnBg $Pal.ActionBtnBorder $Pal.SubFg
+    $disBtn.Add_Click({
+      $env:OPENCLAW_RADAR_WORKSPACE = $HudRoot
+      & node $HandoffScript --mode dismiss-session --issue "$issNum" 2>$null | Out-Null
+      if ($null -ne $script:PendingStage2Session -and [int]$script:PendingStage2Session.issueNumber -eq $issNum) {
+        $script:PendingStage2Session = $null
+      }
+      Reload-LocalAuxState
+      Update-HudView
+    }.GetNewClosure())
+    [void]$btnWrap.Children.Add($disBtn)
+  }
+
+  [void]$bodyStack.Children.Add($btnWrap)
+  [void]$rowGrid.Children.Add($bodyStack)
+  $card.Child = $rowGrid
   [void]$CardsStack.Children.Add($card)
 }
 
@@ -1843,6 +2139,46 @@ function Update-HudView {
     Set-StyledButton $BtnConfirmHandoff $Pal.PrimaryBtnBg $Pal.PrimaryBtnBorder $Pal.PrimaryBtnFg
   } else {
     $HandoffConfirmBorder.Visibility = [System.Windows.Visibility]::Collapsed
+  }
+
+  # Stage 2 Publish / Continue Dialog styling
+  if ($null -ne $script:PendingStage2Session) {
+    $Stage2ConfirmBorder.Visibility = [System.Windows.Visibility]::Visible
+    $Stage2ConfirmBorder.Background = ConvertFrom-BrushHex $Pal.DrawerBg
+    $Stage2ConfirmBorder.BorderBrush = ConvertFrom-BrushHex $(if ($script:Stage2Mode -eq "publish") { $Pal.BadgeReadyBorder } else { $Pal.DrawerBorder })
+    $Stage2HeaderTb.Foreground = ConvertFrom-BrushHex $(if ($script:Stage2Mode -eq "publish") { $Pal.TileP2Fg } else { $Pal.TileP34Fg })
+    $Stage2StatTb.Foreground = ConvertFrom-BrushHex $Pal.SubFg
+    $ChkIncludeTranscript.Content = $L.Stage2TranscriptChk
+    $ChkIncludeTranscript.Foreground = ConvertFrom-BrushHex $Pal.TitleFg
+    $ChkIncludeTranscript.IsEnabled = (-not $script:IsRunningStage2)
+    $BtnPreviewTranscript.Content = $L.Stage2PreviewBtn
+    $BtnPreviewTranscript.IsEnabled = (-not $script:IsRunningStage2)
+    Set-StyledButton $BtnPreviewTranscript $Pal.ActionBtnBg $Pal.ActionBtnBorder $Pal.ActionBtnFg
+    $Stage2InputBorder.Background = ConvertFrom-BrushHex $Pal.InputBg
+    $Stage2InputBorder.BorderBrush = ConvertFrom-BrushHex $Pal.InputBorder
+    $TxtStage2Input.IsEnabled = (-not $script:IsRunningStage2)
+    $TxtStage2Input.Foreground = ConvertFrom-BrushHex $Pal.TitleFg
+    $TxtStage2Input.CaretBrush = ConvertFrom-BrushHex $Pal.TitleFg
+    if ($script:Stage2InlineError) {
+      $Stage2StatusTb.Visibility = [System.Windows.Visibility]::Visible
+      $Stage2StatusTb.Foreground = ConvertFrom-BrushHex $Pal.BadgeFailFg
+      $Stage2StatusTb.Text = "⚠️ $($script:Stage2InlineError)"
+    } elseif ($script:IsRunningStage2 -and $script:Stage2ProgressText) {
+      $Stage2StatusTb.Visibility = [System.Windows.Visibility]::Visible
+      $Stage2StatusTb.Foreground = ConvertFrom-BrushHex $Pal.TileP2Fg
+      $Stage2StatusTb.Text = "⏳ $($script:Stage2ProgressText)"
+    } else {
+      $Stage2StatusTb.Visibility = [System.Windows.Visibility]::Collapsed
+    }
+    $BtnCancelStage2.Content = $L.HandoffCancelBtn
+    $BtnCancelStage2.IsEnabled = (-not $script:IsRunningStage2)
+    Set-StyledButton $BtnCancelStage2 $Pal.ActionBtnBg $Pal.ActionBtnBorder $Pal.ActionBtnFg
+    $confirmLbl = if ($script:IsRunningStage2) { $L.Stage2RunningBtn } elseif ($script:Stage2Mode -eq "publish") { $L.Stage2ConfirmPubBtn } else { $L.Stage2ConfirmContBtn }
+    $BtnConfirmStage2.Content = $confirmLbl
+    $BtnConfirmStage2.IsEnabled = (-not $script:IsRunningStage2)
+    Set-StyledButton $BtnConfirmStage2 $Pal.PrimaryBtnBg $Pal.PrimaryBtnBorder $Pal.PrimaryBtnFg
+  } else {
+    $Stage2ConfirmBorder.Visibility = [System.Windows.Visibility]::Collapsed
   }
 
   $BtnRefresh.Content = if ($script:IsRefreshing) { $L.BtnRefreshing } else { $L.BtnRefresh }
@@ -2031,6 +2367,16 @@ function Update-HudView {
 
     Add-TrackedSummarySection $Pal
   } else {
+    if ($script:ActiveFilter -eq "ALL") {
+      $actionableSessions = if ($script:ActiveSessions) {
+        @($script:ActiveSessions | Where-Object { ([string]$_.phase).ToLowerInvariant() -in @("running", "settled") })
+      } else { @() }
+      if ($actionableSessions.Count -gt 0) {
+        Add-SectionHeader ($L.SecActiveHandoffs -f $actionableSessions.Count) $Pal.TileP2Fg
+        foreach ($s in ($actionableSessions | Select-Object -First 4)) { Add-ActiveSessionCard $s $Pal }
+      }
+    }
+
     if ($script:ActiveFilter -in @("ALL", "P1") -and $p1Active.Count -gt 0) {
       Add-SectionHeader ($L.SecP1 -f $p1Active.Count) $Pal.TileP1Fg
       foreach ($item in $p1Active) { Add-PrCard $item $Pal }
@@ -2059,7 +2405,7 @@ function Update-HudView {
     }
   }
 
-  if (-not $script:IsRefreshing -and -not $script:IsFocusing -and -not $script:IsLaunchingHandoff) {
+  if (-not $script:IsRefreshing -and -not $script:IsFocusing -and -not $script:IsLaunchingHandoff -and -not $script:IsRunningStage2) {
     $FooterStatus.Text = ($L.FooterIdle -f $score.changedCount, $script:HotKeyLabel)
   }
   Update-TrayVisuals
@@ -2212,12 +2558,13 @@ function Invoke-ExitHud {
   $script:AllowExit = $true
   Save-HudPrefs
   if ($PollTimer) { $PollTimer.Stop() }
-  foreach ($j in @($script:SweepJob, $script:FocusJob, $script:HandoffJob)) {
+  foreach ($j in @($script:SweepJob, $script:FocusJob, $script:HandoffJob, $script:Stage2Job)) {
     if ($j) { Remove-Job -Job $j -Force -ErrorAction SilentlyContinue }
   }
   $script:SweepJob = $null
   $script:FocusJob = $null
   $script:HandoffJob = $null
+  $script:Stage2Job = $null
   if ($script:HotKeyHost) {
     try { $script:HotKeyHost.Dispose() } catch {}
     $script:HotKeyHost = $null
@@ -2415,6 +2762,65 @@ function Start-CandidateHandoffLaunch {
     }
     return $joined
   } -ArgumentList $HudRoot, $HandoffScript, ([string]$cand.repo), ([int]$cand.number), $agentId, $claimFile, $sendClaim
+}
+
+function Start-Stage2Execution {
+  if ($script:IsRunningStage2 -or $null -eq $script:PendingStage2Session) { return }
+  if (-not (Test-Path -LiteralPath $HandoffScript)) { return }
+
+  $sess = $script:PendingStage2Session
+  $issNum = [int]$sess.issueNumber
+  $repoSlug = if ($sess.repo) { [string]$sess.repo } else { "openclaw/openclaw" }
+  $modeToRun = if ($script:Stage2Mode -eq "publish") { "publish-pr" } else { "continue" }
+  $inputText = $TxtStage2Input.Text.Trim()
+  $incTranscript = ($modeToRun -eq "publish-pr") -and ([bool]$ChkIncludeTranscript.IsChecked)
+
+  if ($modeToRun -eq "continue" -and $inputText.Length -eq 0) {
+    $script:Stage2InlineError = if ((Get-EffectiveLang) -eq "tr") { "Lütfen oturuma gönderilecek devam talimatını yazın." } else { "Please enter a follow-up instruction to send." }
+    Update-HudView
+    return
+  }
+
+  $handoffsDir = Join-Path $StateDir "handoffs"
+  if (-not (Test-Path $handoffsDir)) { New-Item -ItemType Directory -Path $handoffsDir -Force | Out-Null }
+  $progressPath = Join-Path $handoffsDir "launch-progress.json"
+  Remove-Item -LiteralPath $progressPath -Force -ErrorAction SilentlyContinue
+
+  $promptFile = ""
+  if ($inputText.Length -gt 0) {
+    $promptFile = Join-Path $handoffsDir "stage2-input-$issNum.txt"
+    Set-Content -LiteralPath $promptFile -Value $inputText -Encoding utf8 -NoNewline
+  }
+
+  $script:Stage2InlineError = ""
+  $script:Stage2ProgressText = if ($modeToRun -eq "publish-pr") {
+    if ((Get-EffectiveLang) -eq "tr") { "[1/5] #$issNum rebase & PR yayını başlatılıyor..." } else { "[1/5] Starting rebase & PR publish for #$issNum..." }
+  } else {
+    if ((Get-EffectiveLang) -eq "tr") { "[1/2] #$issNum oturumuna talimat gönderiliyor..." } else { "[1/2] Sending instruction to #$issNum..." }
+  }
+  $script:IsRunningStage2 = $true
+  Update-HudView
+
+  $script:Stage2Job = Start-Job -ScriptBlock {
+    param($RootDirInner, $HandoffScriptInner, $ModeInner, $RepoInner, $IssueNumInner, $PromptFileInner, $IncTranscriptInner)
+    $ErrorActionPreference = "Continue"
+    $env:OPENCLAW_RADAR_WORKSPACE = $RootDirInner
+    $argsList = @($HandoffScriptInner, "--mode", $ModeInner, "--repo", $RepoInner, "--issue", "$IssueNumInner")
+    if ($PromptFileInner) {
+      $argsList += @("--prompt-file", $PromptFileInner)
+    }
+    if ($IncTranscriptInner) {
+      $argsList += @("--include-transcript")
+    }
+    $errFile = Join-Path $RootDirInner "state\handoffs\stage2-stderr-$IssueNumInner.log"
+    $stdoutLines = & node @argsList 2>$errFile
+    $joined = ($stdoutLines | ForEach-Object { "$_" }) -join "`n"
+    if (-not $joined.Trim() -and (Test-Path -LiteralPath $errFile)) {
+      $errRaw = (Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue)
+      return (@{ ok = $false; message = $errRaw } | ConvertTo-Json -Compress)
+    }
+    return $joined
+  } -ArgumentList $HudRoot, $HandoffScript, $modeToRun, $repoSlug, $issNum, $promptFile, $incTranscript
 }
 
 # Global Hotkey + System Tray setup (skipped during headless PNG preview)
@@ -2655,6 +3061,66 @@ $PollTimer.Add_Tick({
       $FooterStatus.Text = ($L.FooterError -f $msg)
     }
   }
+  if ($script:IsRunningStage2) {
+    $progPath = Join-Path $StateDir "handoffs\launch-progress.json"
+    $progObj = Read-JsonFileSafe $progPath
+    if ($progObj -and $progObj.detail) {
+      $nextProg = "[$($progObj.step)] $($progObj.detail)"
+      if ($nextProg -ne $script:Stage2ProgressText) {
+        $script:Stage2ProgressText = $nextProg
+        $Stage2StatusTb.Visibility = [System.Windows.Visibility]::Visible
+        $Stage2StatusTb.Foreground = ConvertFrom-BrushHex $Palettes[$script:CurrentTheme].TileP2Fg
+        $Stage2StatusTb.Text = "⏳ $nextProg"
+        $FooterStatus.Text = $nextProg
+      }
+    }
+  }
+  if ($script:Stage2Job -and $script:Stage2Job.State -in @("Completed", "Failed", "Stopped")) {
+    $L = Get-LangTable
+    $rawOut = ""
+    try { $rawOut = (Receive-Job -Job $script:Stage2Job -ErrorAction SilentlyContinue) -join "`n" } catch {}
+    Remove-Job -Job $script:Stage2Job -Force -ErrorAction SilentlyContinue
+    $script:Stage2Job = $null
+    $script:IsRunningStage2 = $false
+    $script:Stage2ProgressText = ""
+    $resObj = $null
+    try {
+      $idx = $rawOut.IndexOf("{")
+      if ($idx -ge 0) { $resObj = $rawOut.Substring($idx) | ConvertFrom-Json }
+    } catch {}
+    if ($resObj -and $resObj.ok) {
+      $script:PendingStage2Session = $null
+      $script:Stage2InlineError = ""
+      Reload-LocalAuxState
+      Update-HudView
+      if ($resObj.mode -eq "publish-pr") {
+        $FooterStatus.Text = ($L.Stage2PublishedMsg -f $resObj.issueNumber, $resObj.prNumber)
+        if (-not $SavePreview -and -not $script:IsRefreshing) {
+          Start-BackgroundSweep
+        }
+      } else {
+        $FooterStatus.Text = ($L.Stage2ContinuedMsg -f $resObj.issueNumber)
+      }
+    } else {
+      $msg = if ($resObj -and $resObj.message) { [string]$resObj.message } elseif ($rawOut) { $rawOut } else { $L.FooterFailed }
+      $script:Stage2InlineError = $msg
+      Reload-LocalAuxState
+      Update-HudView
+      $FooterStatus.Text = ($L.FooterError -f $msg)
+    }
+  }
+  if (-not $SavePreview -and (([datetime]::UtcNow) - $script:LastSessionFileCheckUtc).TotalSeconds -ge 2.0) {
+    $script:LastSessionFileCheckUtc = [datetime]::UtcNow
+    if (Test-Path -LiteralPath $ActiveSessionsPath) {
+      try {
+        $curMtime = (Get-Item -LiteralPath $ActiveSessionsPath).LastWriteTimeUtc
+        if ($curMtime -ne $script:LastActiveSessionsMtime) {
+          Reload-LocalAuxState
+          Update-HudView
+        }
+      } catch {}
+    }
+  }
 })
 $PollTimer.Start()
 
@@ -2748,6 +3214,33 @@ $BtnCancelHandoff.Add_Click({
 })
 $BtnConfirmHandoff.Add_Click({ Start-CandidateHandoffLaunch })
 
+$BtnCancelStage2.Add_Click({
+  $script:PendingStage2Session = $null
+  $script:Stage2InlineError = ""
+  Update-HudView
+})
+$BtnConfirmStage2.Add_Click({ Start-Stage2Execution })
+$BtnPreviewTranscript.Add_Click({
+  if ($null -eq $script:PendingStage2Session -or -not (Test-Path -LiteralPath $HandoffScript)) { return }
+  $issNum = [int]$script:PendingStage2Session.issueNumber
+  $env:OPENCLAW_RADAR_WORKSPACE = $HudRoot
+  $rawPrev = (& node $HandoffScript --mode preview-transcript --issue "$issNum" 2>$null) -join "`n"
+  $prevObj = $null
+  try {
+    if ($rawPrev -and $rawPrev.IndexOf("{") -ge 0) {
+      $prevObj = $rawPrev.Substring($rawPrev.IndexOf("{")) | ConvertFrom-Json
+    }
+  } catch {}
+  if ($prevObj -and $prevObj.ok -and $prevObj.previewPath -and (Test-Path -LiteralPath $prevObj.previewPath)) {
+    $script:Stage2InlineError = ""
+    Update-HudView
+    Start-Process $prevObj.previewPath
+  } else {
+    $script:Stage2InlineError = if ($prevObj -and $prevObj.message) { [string]$prevObj.message } else { (Get-LangTable).FooterFailed }
+    Update-HudView
+  }
+})
+
 $BtnClose.Add_Click({ Hide-HudToTray })
 
 $BtnPin.Add_Click({
@@ -2791,7 +3284,12 @@ $TileCand.Add_MouseLeftButtonUp({
 $Window.Add_KeyDown({
   param($sender, $e)
   if ($e.Key -eq [System.Windows.Input.Key]::Escape) {
-    if ($null -ne $script:PendingHandoffCandidate) {
+    if ($null -ne $script:PendingStage2Session) {
+      $e.Handled = $true
+      $script:PendingStage2Session = $null
+      $script:Stage2InlineError = ""
+      Update-HudView
+    } elseif ($null -ne $script:PendingHandoffCandidate) {
       $e.Handled = $true
       $script:PendingHandoffCandidate = $null
       Update-HudView
@@ -2875,6 +3373,12 @@ if ($PreviewHandoffIssue -gt 0 -and $script:WatchReport -and $script:WatchReport
   $matchCand = @($script:WatchReport.activeCandidates | Where-Object { [int]$_.number -eq $PreviewHandoffIssue }) | Select-Object -First 1
   if ($matchCand) {
     Open-HandoffConfirmDialog $matchCand
+  }
+}
+if ($PreviewStage2Issue -gt 0 -and $script:ActiveSessions) {
+  $matchSess = @($script:ActiveSessions | Where-Object { [int]$_.issueNumber -eq $PreviewStage2Issue }) | Select-Object -First 1
+  if ($matchSess) {
+    Open-Stage2Dialog $matchSess "publish"
   }
 }
 Update-HudView

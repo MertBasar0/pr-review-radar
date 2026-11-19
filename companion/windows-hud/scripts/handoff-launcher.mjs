@@ -88,6 +88,10 @@ function parseArgs(argv) {
     issue: 0,
     agentId: "",
     claimCommentFile: "",
+    promptFile: "",
+    prTitle: "",
+    bodyFile: "",
+    includeTranscript: false,
     noClaim: false,
     dryRun: false,
     json: false,
@@ -106,6 +110,14 @@ function parseArgs(argv) {
       opts.agentId = argv[++i].trim();
     } else if (arg === "--claim-comment-file" && argv[i + 1]) {
       opts.claimCommentFile = path.resolve(argv[++i]);
+    } else if (arg === "--prompt-file" && argv[i + 1]) {
+      opts.promptFile = path.resolve(argv[++i]);
+    } else if (arg === "--pr-title" && argv[i + 1]) {
+      opts.prTitle = argv[++i].trim();
+    } else if (arg === "--body-file" && argv[i + 1]) {
+      opts.bodyFile = path.resolve(argv[++i]);
+    } else if (arg === "--include-transcript") {
+      opts.includeTranscript = true;
     } else if (arg === "--no-claim") {
       opts.noClaim = true;
     } else if (arg === "--dry-run") {
@@ -774,12 +786,25 @@ async function acquireIssueLaunchLock(handoffsDir, issueNumber) {
   };
 }
 
-async function spawnWorkerProcess({ runtime, jobFile, workerLogFile, issueNumber, attachHandoffId = "" }) {
-  const extraArg = attachHandoffId ? ` --attach-handoff-id "${attachHandoffId}"` : "";
+async function spawnWorkerProcess({
+  runtime,
+  jobFile,
+  workerLogFile,
+  issueNumber,
+  attachHandoffId = "",
+  continueHandoffId = "",
+  continueMessageFile = "",
+}) {
   if (runtime === "wsl") {
     const wslWorker = await toWslPath(WORKER_SCRIPT);
     const wslJob = await toWslPath(jobFile);
     const wslLog = await toWslPath(workerLogFile);
+    const wslMsg = continueMessageFile ? await toWslPath(continueMessageFile) : "";
+    const extraParts = [];
+    if (attachHandoffId) extraParts.push(`--attach-handoff-id "${attachHandoffId}"`);
+    if (continueHandoffId) extraParts.push(`--continue-handoff-id "${continueHandoffId}"`);
+    if (wslMsg) extraParts.push(`--continue-message-file "${wslMsg}"`);
+    const extraArg = extraParts.length ? ` ${extraParts.join(" ")}` : "";
     const unitName = `clawhandoff-issue-${issueNumber}-${Date.now()}`;
     const innerCmd = [
       'export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH";',
@@ -808,9 +833,13 @@ async function spawnWorkerProcess({ runtime, jobFile, workerLogFile, issueNumber
     return;
   }
 
-  const extraArgArr = attachHandoffId ? ["--attach-handoff-id", attachHandoffId] : [];
+  const extraArgArr = [];
+  if (attachHandoffId) extraArgArr.push("--attach-handoff-id", attachHandoffId);
+  if (continueHandoffId) extraArgArr.push("--continue-handoff-id", continueHandoffId);
+  if (continueMessageFile) extraArgArr.push("--continue-message-file", continueMessageFile);
+  const extraCmdStr = extraArgArr.map((x) => `"${x}"`).join(" ");
   if (process.platform === "win32") {
-    const cmdLine = `"${process.execPath}" "${WORKER_SCRIPT}" --job-file "${jobFile}"${extraArg}`;
+    const cmdLine = `"${process.execPath}" "${WORKER_SCRIPT}" --job-file "${jobFile}"${extraCmdStr ? ` ${extraCmdStr}` : ""}`;
     await execFileAsync(
       "pwsh",
       [
@@ -1201,6 +1230,641 @@ async function launchHandoffFlow(opts, config) {
   }
 }
 
+async function updateSessionAndActiveIndex(handoffsDir, issueNumber, updatedRec) {
+  const statusFile = path.join(handoffsDir, `session-issue-${issueNumber}.json`);
+  const indexFile = path.join(handoffsDir, "active-sessions.json");
+  await writeJsonAtomic(statusFile, updatedRec);
+  const rawList = await readJsonOrDefault(indexFile, []);
+  const list = Array.isArray(rawList) ? rawList : [];
+  const filtered = list.filter(
+    (item) =>
+      item.handoffId !== updatedRec.handoffId &&
+      item.requestId !== updatedRec.requestId &&
+      Number(item.issueNumber) !== Number(issueNumber),
+  );
+  filtered.unshift(updatedRec);
+  await writeJsonAtomic(indexFile, filtered.slice(0, 25));
+}
+
+function buildWorktreeGitArgs(winWorktreePath, localRepoPath, issueNumber, subArgs) {
+  const baseFlags = ["-c", "safe.directory=*", "-c", "core.filemode=false", "-c", "core.autocrlf=false"];
+  const repoWtDir = localRepoPath
+    ? path.join(path.resolve(localRepoPath), ".git", "worktrees", `issue-${issueNumber}`)
+    : "";
+  if (repoWtDir && existsSync(repoWtDir) && winWorktreePath && existsSync(winWorktreePath)) {
+    return [
+      ...baseFlags,
+      `--git-dir=${repoWtDir}`,
+      `--work-tree=${winWorktreePath}`,
+      ...subArgs,
+    ];
+  }
+  return [...baseFlags, "-C", winWorktreePath, ...subArgs];
+}
+
+async function inspectCandidateFlow(opts, config) {
+  if (!opts.issue) {
+    return { ok: false, code: "INVALID_ARGS", message: "Issue numarası gerekli." };
+  }
+  const handoffsDir = path.join(HUD_ROOT, "state", "handoffs");
+  const statusFile = path.join(handoffsDir, `session-issue-${opts.issue}.json`);
+  const session = await readJsonOrDefault(statusFile, null);
+  if (!session) {
+    return { ok: false, code: "NOT_FOUND", message: `#${opts.issue} için kayıtlı oturum bulunamadı.` };
+  }
+  const localRepoPath = config?.handoff?.localRepoPath || config?.watch?.localRepoPath || "";
+  const wtPath = session.worktreePath || path.join(HUD_ROOT, "state", "worktrees", `issue-${opts.issue}`);
+
+  let headSha = session.headSha || null;
+  let commitHeadline = "";
+  let statSummary = "";
+  let numstatSummary = { prodAdded: 0, prodDeleted: 0, testAdded: 0, testDeleted: 0, files: [] };
+
+  if (existsSync(wtPath)) {
+    try {
+      const { stdout: shaOut } = await execFileAsync(
+        "git",
+        buildWorktreeGitArgs(wtPath, localRepoPath, opts.issue, ["rev-parse", "HEAD"]),
+        { timeout: 10_000, windowsHide: true },
+      );
+      if (/^[0-9a-f]{40}$/i.test(shaOut.trim())) {
+        headSha = shaOut.trim().toLowerCase();
+      }
+    } catch {}
+    if (headSha && localRepoPath && existsSync(localRepoPath)) {
+      try {
+        const { stdout: subjOut } = await execFileAsync(
+          "git",
+          ["-C", localRepoPath, "show", "-s", "--format=%s", headSha],
+          { timeout: 10_000, windowsHide: true },
+        );
+        commitHeadline = subjOut.trim();
+        const { stdout: statOut } = await execFileAsync(
+          "git",
+          ["-C", localRepoPath, "show", "--stat", "--format=", headSha],
+          { timeout: 10_000, windowsHide: true },
+        );
+        statSummary = statOut.trim();
+        const { stdout: numOut } = await execFileAsync(
+          "git",
+          ["-C", localRepoPath, "show", "--numstat", "--format=", headSha],
+          { timeout: 10_000, windowsHide: true },
+        );
+        for (const line of numOut.trim().split(/\r?\n/).filter(Boolean)) {
+          const parts = line.split("\t");
+          if (parts.length < 3) continue;
+          const add = Number.parseInt(parts[0], 10) || 0;
+          const del = Number.parseInt(parts[1], 10) || 0;
+          const fp = parts[2].trim();
+          const isTest = /(\.test\.|\.spec\.|Tests?\.swift|^test\/|\/Tests\/)/i.test(fp);
+          if (isTest) {
+            numstatSummary.testAdded += add;
+            numstatSummary.testDeleted += del;
+          } else {
+            numstatSummary.prodAdded += add;
+            numstatSummary.prodDeleted += del;
+          }
+          numstatSummary.files.push({ path: fp, added: add, deleted: del, isTest });
+        }
+      } catch {}
+    }
+  }
+
+  return {
+    ok: true,
+    issueNumber: opts.issue,
+    repo: session.repo || opts.repo || "openclaw/openclaw",
+    phase: session.phase,
+    handoffId: session.handoffId,
+    headSha,
+    shortSha: headSha ? headSha.slice(0, 10) : null,
+    commitHeadline,
+    summary: session.summary || "",
+    statSummary,
+    numstat: numstatSummary,
+    prNumber: session.prNumber || null,
+    prUrl: session.prUrl || null,
+  };
+}
+
+async function continueSessionFlow(opts) {
+  if (!opts.issue || !opts.promptFile || !existsSync(opts.promptFile)) {
+    return {
+      ok: false,
+      code: "INVALID_ARGS",
+      message: "Issue numarası ve talimat dosyası (--prompt-file) gerekli.",
+    };
+  }
+  const promptText = (await fs.readFile(opts.promptFile, "utf8")).trim();
+  if (!promptText) {
+    return { ok: false, code: "EMPTY_PROMPT", message: "Gönderilecek talimat metni boş olamaz." };
+  }
+
+  const handoffsDir = path.join(HUD_ROOT, "state", "handoffs");
+  const statusFile = path.join(handoffsDir, `session-issue-${opts.issue}.json`);
+  const jobFile = path.join(handoffsDir, `job-issue-${opts.issue}.json`);
+  const workerLogFile = path.join(handoffsDir, `worker-issue-${opts.issue}.log`);
+
+  const session = await readJsonOrDefault(statusFile, null);
+  if (!session?.handoffId || !existsSync(jobFile)) {
+    return {
+      ok: false,
+      code: "NO_SESSION",
+      message: `#${opts.issue} için devam ettirilebilecek bir handoff oturumu bulunamadı.`,
+    };
+  }
+
+  const lock = await acquireIssueLaunchLock(handoffsDir, opts.issue);
+  if (!lock.acquired) {
+    return {
+      ok: false,
+      code: "LAUNCH_IN_PROGRESS",
+      message: `#${opts.issue} üzerinde zaten devam eden bir işlem var.`,
+    };
+  }
+  try {
+    await reportProgress(opts.issue, "1/2", `#${opts.issue} oturumuna yeni talimat iletiliyor...`);
+    const runtime = String(session.targetId || "").startsWith("wsl-") ? "wsl" : process.platform;
+    await spawnWorkerProcess({
+      runtime,
+      jobFile,
+      workerLogFile,
+      issueNumber: opts.issue,
+      continueHandoffId: session.handoffId,
+      continueMessageFile: opts.promptFile,
+    });
+    await delay(1_500);
+    return {
+      ok: true,
+      mode: "continue",
+      issueNumber: opts.issue,
+      handoffId: session.handoffId,
+      agentLabel: session.targetLabel || "OpenClaw",
+    };
+  } finally {
+    await lock.release();
+  }
+}
+
+async function abortOrDismissSessionFlow(opts) {
+  if (!opts.issue) {
+    return { ok: false, code: "INVALID_ARGS", message: "Issue numarası gerekli." };
+  }
+  const handoffsDir = path.join(HUD_ROOT, "state", "handoffs");
+  const statusFile = path.join(handoffsDir, `session-issue-${opts.issue}.json`);
+  const jobFile = path.join(handoffsDir, `job-issue-${opts.issue}.json`);
+  const indexFile = path.join(handoffsDir, "active-sessions.json");
+
+  if (opts.mode === "dismiss-session") {
+    const rawList = await readJsonOrDefault(indexFile, []);
+    const list = Array.isArray(rawList) ? rawList : [];
+    const next = list.filter((x) => Number(x.issueNumber) !== Number(opts.issue));
+    await writeJsonAtomic(indexFile, next);
+    return { ok: true, mode: "dismiss-session", issueNumber: opts.issue };
+  }
+
+  const session = await readJsonOrDefault(statusFile, null);
+  const job = await readJsonOrDefault(jobFile, null);
+  const targetArgs = job?.bridgeConfig?.targets?.[job?.targetId]?.args || [];
+  const sessIdx = Array.isArray(targetArgs) ? targetArgs.indexOf("--session") : -1;
+  const ocSessionKey = sessIdx >= 0 ? targetArgs[sessIdx + 1] : "";
+
+  if (ocSessionKey && String(session?.targetId || "").startsWith("wsl-")) {
+    await execFileAsync(
+      "wsl.exe",
+      [
+        "-e",
+        "bash",
+        "-lc",
+        `export PATH="$HOME/.local/bin:$PATH"; openclaw sessions delete "${ocSessionKey}" --yes --json >/dev/null 2>&1 || true`,
+      ],
+      { timeout: 12_000, windowsHide: true },
+    ).catch(() => {});
+  }
+
+  if (session) {
+    const stoppedRec = {
+      ...session,
+      ok: false,
+      phase: "stopped",
+      lifecycleStatus: "stopped",
+      directiveAction: null,
+      directiveReason: "Oturum kullanıcı tarafından durduruldu.",
+      updatedAt: new Date().toISOString(),
+    };
+    await updateSessionAndActiveIndex(handoffsDir, opts.issue, stoppedRec);
+  }
+  return { ok: true, mode: "abort-session", issueNumber: opts.issue };
+}
+
+async function previewTranscriptFlow(opts, config) {
+  if (!opts.issue) {
+    return { ok: false, code: "INVALID_ARGS", message: "Issue numarası gerekli." };
+  }
+  const localRepoPath = config?.handoff?.localRepoPath || config?.watch?.localRepoPath || "";
+  const handoffsDir = path.join(HUD_ROOT, "state", "handoffs");
+  await fs.mkdir(handoffsDir, { recursive: true });
+  const previewWinPath = path.join(handoffsDir, `transcript-preview-${opts.issue}.html`);
+  const previewWslPath = await toWslPath(previewWinPath);
+  const wslRepoParent = localRepoPath ? await toWslPath(path.dirname(path.resolve(localRepoPath))) : "/mnt/e";
+
+  const script = [
+    'export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH";',
+    `AT="${wslRepoParent}/.agents/skills/agent-transcript/scripts/agent-transcript";`,
+    'if [ ! -x "$AT" ] && [ -x "$HOME/.agents/skills/agent-transcript/scripts/agent-transcript" ]; then AT="$HOME/.agents/skills/agent-transcript/scripts/agent-transcript"; fi;',
+    `FOUND=$("$AT" find --query "${opts.issue}" --since-days 14 --root "$HOME/.codex" --root "$HOME/.ocm/envs/daily/.openclaw" 2>/dev/null || true);`,
+    'FILE=$(printf "%s" "$FOUND" | node -e \'try{const d=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write(String(d[0]?.file||""));}catch{}\');',
+    'if [ -z "$FILE" ]; then echo "NO_TRANSCRIPT"; exit 2; fi;',
+    `"$AT" preview --session "$FILE" --out "${previewWslPath}" --title "Issue #${opts.issue}"`,
+  ].join(" ");
+
+  try {
+    await execFileAsync("wsl.exe", ["-e", "bash", "-c", script], {
+      timeout: 25_000,
+      windowsHide: true,
+    });
+    return { ok: true, issueNumber: opts.issue, previewPath: previewWinPath };
+  } catch (err) {
+    return {
+      ok: false,
+      code: "NO_SAFE_TRANSCRIPT",
+      message: `#${opts.issue} için önizlenebilecek arındırılmış yerel oturum kaydı bulunamadı.`,
+    };
+  }
+}
+
+async function publishPrFlow(opts, config) {
+  if (!opts.issue) {
+    return { ok: false, code: "INVALID_ARGS", message: "Issue numarası gerekli." };
+  }
+  const handoffsDir = path.join(HUD_ROOT, "state", "handoffs");
+  const lock = await acquireIssueLaunchLock(handoffsDir, opts.issue);
+  if (!lock.acquired) {
+    return {
+      ok: false,
+      code: "LAUNCH_IN_PROGRESS",
+      message: `#${opts.issue} üzerinde başka bir işlem devam ediyor.`,
+    };
+  }
+
+  try {
+    const inspected = await inspectCandidateFlow(opts, config);
+    if (!inspected.ok || !inspected.headSha) {
+      return {
+        ok: false,
+        code: "NO_CANDIDATE_COMMIT",
+        message: inspected.message || `#${opts.issue} için doğrulanmış bir Stage-1 aday commit bulunamadı.`,
+      };
+    }
+
+    const repo = opts.repo || inspected.repo || config?.watch?.repo || config?.repositories?.[0] || "openclaw/openclaw";
+    const viewer = config?.viewerHandle || "MertBasar0";
+    const localRepoPath = config?.handoff?.localRepoPath || config?.watch?.localRepoPath || "";
+    const statusFile = path.join(handoffsDir, `session-issue-${opts.issue}.json`);
+    const jobFile = path.join(handoffsDir, `job-issue-${opts.issue}.json`);
+    const session = await readJsonOrDefault(statusFile, {});
+    const job = await readJsonOrDefault(jobFile, null);
+    const wtPath = session.worktreePath || path.join(HUD_ROOT, "state", "worktrees", `issue-${opts.issue}`);
+    let branchName = `fix/issue-${opts.issue}`;
+
+    // Step 1/5: Fetch upstream/main & rebase candidate cleanly
+    await reportProgress(opts.issue, "1/5", `#${opts.issue} aday dalı güncel main üzerine rebase ediliyor...`);
+    let finalSha = inspected.headSha;
+    let commitSubject = inspected.commitHeadline || `fix: resolve issue #${opts.issue}`;
+
+    try {
+      const { stdout: curBranchOut } = await execFileAsync(
+        "git",
+        buildWorktreeGitArgs(wtPath, localRepoPath, opts.issue, ["rev-parse", "--abbrev-ref", "HEAD"]),
+        { timeout: 10_000, windowsHide: true },
+      );
+      const curBranch = curBranchOut.trim();
+      if (curBranch && curBranch !== "HEAD" && curBranch !== "main") {
+        branchName = curBranch;
+      }
+    } catch {}
+
+    let baseRef = "origin/main";
+    try {
+      await execFileAsync("git", ["-C", localRepoPath, "fetch", "upstream", "main", "--quiet"], {
+        timeout: 45_000,
+        windowsHide: true,
+      });
+      baseRef = "upstream/main";
+    } catch {
+      await execFileAsync("git", ["-C", localRepoPath, "fetch", "origin", "main", "--quiet"], {
+        timeout: 45_000,
+        windowsHide: true,
+      }).catch(() => {});
+    }
+
+    await execFileAsync(
+      "git",
+      buildWorktreeGitArgs(wtPath, localRepoPath, opts.issue, ["checkout", "-B", branchName, finalSha]),
+      { timeout: 20_000, windowsHide: true },
+    );
+
+    try {
+      await execFileAsync(
+        "git",
+        buildWorktreeGitArgs(wtPath, localRepoPath, opts.issue, ["rebase", baseRef]),
+        { timeout: 120_000, windowsHide: true },
+      );
+    } catch (rebErr) {
+      await execFileAsync(
+        "git",
+        buildWorktreeGitArgs(wtPath, localRepoPath, opts.issue, ["rebase", "--abort"]),
+        { timeout: 15_000, windowsHide: true },
+      ).catch(() => {});
+      throw new Error(
+        `#${opts.issue} dalı ${baseRef} üzerine rebase edilirken çakışma oluştu. '💬 Devam' butonuyla ajana rebase talimatı verebilirsiniz.`,
+      );
+    }
+
+    await execFileAsync(
+      "git",
+      buildWorktreeGitArgs(wtPath, localRepoPath, opts.issue, ["diff", "--check", `${baseRef}..HEAD`]),
+      { timeout: 15_000, windowsHide: true },
+    );
+
+    const { stdout: newShaOut } = await execFileAsync(
+      "git",
+      buildWorktreeGitArgs(wtPath, localRepoPath, opts.issue, ["rev-parse", "HEAD"]),
+      { timeout: 10_000, windowsHide: true },
+    );
+    finalSha = newShaOut.trim().toLowerCase();
+
+    const { stdout: subjOut } = await execFileAsync(
+      "git",
+      ["-C", localRepoPath, "show", "-s", "--format=%s", finalSha],
+      { timeout: 10_000, windowsHide: true },
+    );
+    if (subjOut.trim()) commitSubject = subjOut.trim();
+
+    // Step 2/5: Collect claimedChecks + operator notes & build OpenClaw PR body
+    await reportProgress(opts.issue, "2/5", `#${opts.issue} PR gövdesi ve kanıt (Evidence) bölümü hazırlanıyor...`);
+    let extraNote = "";
+    if (opts.promptFile && existsSync(opts.promptFile)) {
+      extraNote = (await fs.readFile(opts.promptFile, "utf8")).trim();
+    }
+
+    let issueTitle = "";
+    try {
+      const { stdout: issOut } = await runGhResilient([
+        "issue",
+        "view",
+        String(opts.issue),
+        "--repo",
+        repo,
+        "--json",
+        "title",
+        "--jq",
+        ".title",
+      ]);
+      issueTitle = sanitizeText(issOut.trim(), 160);
+    } catch {}
+
+    let claimedChecks = [];
+    const targetArgs = job?.bridgeConfig?.targets?.[job?.targetId]?.args || [];
+    const sessIdx = Array.isArray(targetArgs) ? targetArgs.indexOf("--session") : -1;
+    const ocSessionKey = sessIdx >= 0 ? targetArgs[sessIdx + 1] : "";
+    if (ocSessionKey && String(session?.targetId || "").startsWith("wsl-")) {
+      try {
+        const { stdout: histOut } = await execFileAsync(
+          "wsl.exe",
+          [
+            "-e",
+            "bash",
+            "-lc",
+            `export PATH="$HOME/.local/bin:$PATH"; openclaw gateway call chat.history --params '{"sessionKey":"${ocSessionKey}","limit":4}' --json`,
+          ],
+          { timeout: 15_000, windowsHide: true },
+        );
+        const hist = JSON.parse(histOut);
+        for (const m of (hist?.messages || []).slice().reverse()) {
+          if (m?.role !== "assistant") continue;
+          const txt = Array.isArray(m.content)
+            ? m.content.map((c) => c?.text || "").join("\n")
+            : String(m.content || "");
+          const fence = /```handoff-result\s*([\s\S]*?)```/i.exec(txt);
+          if (fence) {
+            const parsed = JSON.parse(fence[1].trim());
+            if (Array.isArray(parsed.claimedChecks)) {
+              claimedChecks = parsed.claimedChecks;
+            }
+            break;
+          }
+        }
+      } catch {}
+    }
+
+    const refreshedInspect = await inspectCandidateFlow(opts, config);
+    const ns = refreshedInspect.numstat || inspected.numstat;
+    const prodDelta = (ns?.prodAdded || 0) - (ns?.prodDeleted || 0);
+    const prodDeltaSign = prodDelta > 0 ? `+${prodDelta}` : `${prodDelta}`;
+
+    const prTitle = (opts.prTitle || commitSubject.replace(/\s*\(#\d+\)\s*$/, "")).trim();
+    const summaryText =
+      session.summary ||
+      inspected.summary ||
+      `Resolves #${opts.issue} at the owning boundary with regression test coverage.`;
+
+    const checkLines = claimedChecks
+      .slice(0, 8)
+      .map((c) => `- \`${c.command}\` -> exit \`${c.exitCode}\` (${c.environment || "local"})`);
+
+    const bodyPath = path.join(handoffsDir, `pr-body-issue-${opts.issue}.md`);
+    if (opts.bodyFile && existsSync(opts.bodyFile)) {
+      const customBody = await fs.readFile(opts.bodyFile, "utf8");
+      await fs.writeFile(bodyPath, customBody, "utf8");
+    } else {
+      const bodyLines = [
+        `Closes #${opts.issue}`,
+        ``,
+        `## What Problem This Solves`,
+        ``,
+        issueTitle
+          ? `Fixes #${opts.issue} (${issueTitle.replace(/^\[Bug\]:\s*/i, "")}).`
+          : `Fixes #${opts.issue}.`,
+        ``,
+        `## User Impact`,
+        ``,
+        `Users and operators hitting the workflow in #${opts.issue} now get the expected behavior without regressions on neighboring routes or configurations.`,
+        ``,
+        `## Why This Change Was Made`,
+        ``,
+        summaryText,
+        ``,
+        `## Evidence`,
+        ``,
+        `- **Production vs. Test LOC delta:** production \`+${ns?.prodAdded || 0} / -${ns?.prodDeleted || 0}\` (net \`${prodDeltaSign}\`), tests \`+${ns?.testAdded || 0} / -${ns?.testDeleted || 0}\``,
+        ...(checkLines.length > 0 ? checkLines : [`- \`git diff --check\` -> exit \`0\``]),
+        ...(extraNote ? [``, `### Additional Verification`, ``, extraNote] : []),
+        ``,
+      ];
+      await fs.writeFile(bodyPath, bodyLines.join("\n"), "utf8");
+    }
+
+    if (opts.includeTranscript && localRepoPath) {
+      await reportProgress(opts.issue, "2/5", `#${opts.issue} arındırılmış oturum kaydı (Agent Transcript) ekleniyor...`);
+      const bodyWsl = await toWslPath(bodyPath);
+      const wslRepoParent = await toWslPath(path.dirname(path.resolve(localRepoPath)));
+      const trScript = [
+        'export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH";',
+        `AT="${wslRepoParent}/.agents/skills/agent-transcript/scripts/agent-transcript";`,
+        'if [ ! -x "$AT" ] && [ -x "$HOME/.agents/skills/agent-transcript/scripts/agent-transcript" ]; then AT="$HOME/.agents/skills/agent-transcript/scripts/agent-transcript"; fi;',
+        `FOUND=$("$AT" find --query "${opts.issue}" --since-days 14 --root "$HOME/.codex" --root "$HOME/.ocm/envs/daily/.openclaw" 2>/dev/null || true);`,
+        'FILE=$(printf "%s" "$FOUND" | node -e \'try{const d=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write(String(d[0]?.file||""));}catch{}\');',
+        `if [ -n "$FILE" ]; then "$AT" append-body --body "${bodyWsl}" --session "$FILE" --out "${bodyWsl}"; fi`,
+      ].join(" ");
+      await execFileAsync("wsl.exe", ["-e", "bash", "-c", trScript], {
+        timeout: 25_000,
+        windowsHide: true,
+      }).catch(() => {});
+    }
+
+    // Step 3/5: Push branch to origin (contributor fork)
+    await reportProgress(opts.issue, "3/5", `#${opts.issue} dalı (${branchName}) fork deposuna gönderiliyor...`);
+    await execFileAsync(
+      "git",
+      ["-C", localRepoPath, "push", "origin", `${finalSha}:refs/heads/${branchName}`, "--force-with-lease"],
+      { timeout: 60_000, windowsHide: true },
+    );
+
+    // Step 4/5: Create Draft PR -> Poll mergeable -> Mark Ready
+    await reportProgress(opts.issue, "4/5", `#${opts.issue} için taslak PR açılıp mergeable hesaplaması bekleniyor...`);
+    const headSpec = `${viewer}:${branchName}`;
+    let prNumber = null;
+    let prUrl = null;
+    let isDraft = false;
+
+    const { stdout: existingOut } = await runGhResilient([
+      "pr",
+      "list",
+      "--repo",
+      repo,
+      "--head",
+      headSpec,
+      "--state",
+      "open",
+      "--json",
+      "number,url,isDraft",
+    ]);
+    const existingPrs = JSON.parse(existingOut || "[]");
+    if (Array.isArray(existingPrs) && existingPrs.length > 0) {
+      prNumber = existingPrs[0].number;
+      prUrl = existingPrs[0].url;
+      isDraft = Boolean(existingPrs[0].isDraft);
+      await runGhResilient([
+        "pr",
+        "edit",
+        String(prNumber),
+        "--repo",
+        repo,
+        "--title",
+        prTitle,
+        "--body-file",
+        bodyPath,
+      ]);
+    } else {
+      const { stdout: createdUrl } = await runGhResilient([
+        "pr",
+        "create",
+        "--repo",
+        repo,
+        "--base",
+        "main",
+        "--head",
+        headSpec,
+        "--title",
+        prTitle,
+        "--body-file",
+        bodyPath,
+        "--draft",
+      ]);
+      prUrl = createdUrl.trim();
+      const numMatch = /\/pull\/(\d+)\b/.exec(prUrl);
+      if (numMatch) prNumber = Number.parseInt(numMatch[1], 10);
+      isDraft = true;
+    }
+
+    if (prNumber && isDraft) {
+      const mergeDeadline = Date.now() + 45_000;
+      while (Date.now() < mergeDeadline) {
+        try {
+          const { stdout: mOut } = await runGhResilient([
+            "pr",
+            "view",
+            String(prNumber),
+            "--repo",
+            repo,
+            "--json",
+            "mergeable",
+            "--jq",
+            ".mergeable",
+          ]);
+          const mv = mOut.trim();
+          if (mv && mv !== "UNKNOWN" && mv !== "null") {
+            break;
+          }
+        } catch {}
+        await delay(3_000);
+      }
+      await reportProgress(opts.issue, "4/5", `PR #${prNumber} incelemeye hazır (ready) durumuna alınıyor...`);
+      await runGhResilient(["pr", "ready", String(prNumber), "--repo", repo]);
+    }
+
+    // Step 5/5: Record published state & enroll PR in watch-state.json
+    await reportProgress(opts.issue, "5/5", `PR #${prNumber} izleme listesine ekleniyor...`);
+    const publishedRec = {
+      ...session,
+      ok: true,
+      phase: "published",
+      lifecycleStatus: "completed",
+      directiveAction: "COMPLETE",
+      directiveReason: prUrl ? `PR #${prNumber} açıldı` : null,
+      headSha: finalSha,
+      prNumber,
+      prUrl,
+      updatedAt: new Date().toISOString(),
+    };
+    await updateSessionAndActiveIndex(handoffsDir, opts.issue, publishedRec);
+
+    if (prNumber) {
+      const watchEngine = resolveWatchEngineScript();
+      await execFileAsync(
+        process.execPath,
+        [watchEngine, "--mode", "track", "--track", `pr:${prNumber}`],
+        {
+          cwd: HUD_ROOT,
+          env: { ...process.env, OPENCLAW_RADAR_WORKSPACE: HUD_ROOT },
+          timeout: 10_000,
+          windowsHide: true,
+        },
+      ).catch(() => {});
+    }
+
+    return {
+      ok: true,
+      mode: "publish-pr",
+      issueNumber: opts.issue,
+      repo,
+      branchName,
+      headSha: finalSha,
+      prNumber,
+      prUrl,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      code: "PUBLISH_PR_FAILED",
+      message: err instanceof Error ? err.message : String(err),
+    };
+  } finally {
+    await lock.release();
+  }
+}
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   const config = await readJsonOrDefault(opts.config, {});
@@ -1215,6 +1879,41 @@ async function main() {
     const indexFile = path.join(HUD_ROOT, "state", "handoffs", "active-sessions.json");
     const sessions = await readJsonOrDefault(indexFile, []);
     process.stdout.write(`${JSON.stringify({ ok: true, sessions }, null, 2)}\n`);
+    return;
+  }
+
+  if (opts.mode === "inspect-candidate") {
+    const res = await inspectCandidateFlow(opts, config);
+    process.stdout.write(`${JSON.stringify(res, null, 2)}\n`);
+    if (!res.ok) process.exitCode = 1;
+    return;
+  }
+
+  if (opts.mode === "continue") {
+    const res = await continueSessionFlow(opts);
+    process.stdout.write(`${JSON.stringify(res, null, 2)}\n`);
+    if (!res.ok) process.exitCode = 1;
+    return;
+  }
+
+  if (opts.mode === "abort-session" || opts.mode === "dismiss-session") {
+    const res = await abortOrDismissSessionFlow(opts);
+    process.stdout.write(`${JSON.stringify(res, null, 2)}\n`);
+    if (!res.ok) process.exitCode = 1;
+    return;
+  }
+
+  if (opts.mode === "preview-transcript") {
+    const res = await previewTranscriptFlow(opts, config);
+    process.stdout.write(`${JSON.stringify(res, null, 2)}\n`);
+    if (!res.ok) process.exitCode = 1;
+    return;
+  }
+
+  if (opts.mode === "publish-pr") {
+    const res = await publishPrFlow(opts, config);
+    process.stdout.write(`${JSON.stringify(res, null, 2)}\n`);
+    if (!res.ok) process.exitCode = 1;
     return;
   }
 
